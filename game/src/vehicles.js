@@ -1,221 +1,87 @@
 // Port Solano — vehicles.js
-// The car factory and arcade driving physics: velocity with a grip model so
-// cars drift under handbrake, speed-sensitive steering, collision damage that
-// smokes and then wrecks, and the top-down car renderer (body, glass, wheels,
-// police livery and light bar).
+// Car factory plus arcade driving physics: acceleration, handbrake drift,
+// steering that tightens with speed, and a single damage pool per car that
+// smokes, then wrecks the car when it runs out.
 
-import { CAR_TYPES } from './config.js';
-import { G } from './state.js';
-import { collideCircle } from './city.js';
-import { clamp, angleDelta } from './random.js';
-import { sparks, smokePuff, addSkid, addShake } from './effects.js';
-import { sfx } from './audio.js';
+import { CAR_TYPES } from "./config.js";
+import { makeRng, pick, clamp } from "./random.js";
+import { collidesBuilding } from "./city.js";
+import { G } from "./state.js";
+import { burst } from "./effects.js";
 
 let nextCarId = 1;
 
-export function makeCar(x, y, angle, type, opts = {}) {
-  const spec = CAR_TYPES[type] || CAR_TYPES.sedan;
-  const car = {
-    id: nextCarId++,
-    x, y, angle, vx: 0, vy: 0,
-    type, spec,
-    w: spec.w, h: spec.h,
-    color: opts.color || spec.colors[Math.floor(G.rng.float() * spec.colors.length) % spec.colors.length],
-    hp: spec.hp, maxHp: spec.hp,
-    parked: !!opts.parked,
-    locked: !!opts.locked,
-    isCop: !!opts.isCop,
-    driver: opts.driver || null,   // 'player' | 'traffic' | 'cop' | null
-    wrecked: false,
-    alarmT: 0,
-    smokeT: 0,
-    ai: null,                      // traffic brain, installed by traffic.js
-    lightPhase: G.rng.float() * 6,
+export function makeCar(x, y, angle, rng, opts = {}) {
+  const type = opts.type || pick(rng, CAR_TYPES);
+  return {
+    id: nextCarId++, x, y, angle, vx: 0, vy: 0, speed: 0,
+    type, color: opts.color || pick(rng, type.colors),
+    w: type.w, h: type.h, hp: 100, locked: !!opts.locked,
+    parked: !!opts.parked, driver: opts.driver || null, cop: !!opts.cop,
+    wrecked: false, alarm: 0, smokeTimer: 0,
   };
-  G.cars.push(car);
-  return car;
 }
 
 export function carSpeed(car) { return Math.hypot(car.vx, car.vy); }
 
-// Forward speed signed along the heading (negative when reversing).
-export function forwardSpeed(car) {
-  return car.vx * Math.cos(car.angle) + car.vy * Math.sin(car.angle);
-}
-
-// One physics step. throttle -1..1, steer -1..1. Returns the impact speed if
-// the car hit something hard this step (for damage/sound at the call site).
-export function stepCar(car, throttle, steer, handbrake, dt) {
-  if (car.wrecked) { car.vx *= 0.9; car.vy *= 0.9; return 0; }
-  const spec = car.spec;
-  const fx = Math.cos(car.angle), fy = Math.sin(car.angle);
-  let fwd = car.vx * fx + car.vy * fy;
-  const latX = car.vx - fx * fwd, latY = car.vy - fy * fwd;
-
-  if (throttle > 0) fwd += spec.accel * throttle * dt * (fwd < spec.top ? 1 : 0);
-  else if (throttle < 0) fwd += (fwd > 8 ? -spec.accel * 1.4 : -spec.accel * 0.55) * -throttle * dt * (fwd > -spec.top * 0.38 ? 1 : 0);
-  // Rolling drag and air resistance settle the car at its top speed.
-  fwd -= fwd * 0.55 * dt;
-  if (!handbrake && Math.abs(throttle) < 0.05) fwd -= Math.sign(fwd) * Math.min(Math.abs(fwd), 26 * dt);
-
-  const steerAuthority = clamp(Math.abs(fwd) / 60, 0, 1) * (fwd < 0 ? -1 : 1);
-  car.angle += steer * 1.85 * steerAuthority * dt * (handbrake ? 1.35 : 1);
-
-  const grip = handbrake ? 1.6 : spec.grip;
-  const keep = Math.max(0, 1 - grip * dt);
-  const nfx = Math.cos(car.angle), nfy = Math.sin(car.angle);
-  car.vx = nfx * fwd + latX * keep;
-  car.vy = nfy * fwd + latY * keep;
-
-  const prevX = car.x, prevY = car.y;
-  car.x += car.vx * dt;
-  car.y += car.vy * dt;
-  const fixed = collideCircle(car.x, car.y, 20);
-  let impact = 0;
-  if (fixed.x !== car.x || fixed.y !== car.y) {
-    const closing = Math.hypot(car.x - prevX, car.y - prevY) / Math.max(dt, 0.001);
-    impact = closing;
-    car.x = fixed.x; car.y = fixed.y;
-    if (closing > 130) {
-      damageCar(car, (closing - 110) * 0.16, car.x, car.y);
-      car.vx *= -0.25; car.vy *= -0.25;
-    } else {
-      car.vx *= 0.55; car.vy *= 0.55;
-    }
-  }
-
-  // Skid marks while drifting or braking hard at speed.
-  const lateral = Math.abs(car.vx * -nfy + car.vy * nfx);
-  if ((lateral > 55 || (handbrake && Math.abs(fwd) > 90)) && Math.abs(fwd) > 40) {
-    addSkid(car.x - nfx * 14 - nfy * 9, car.y - nfy * 14 + nfx * 9, car.angle);
-    addSkid(car.x - nfx * 14 + nfy * 9, car.y - nfy * 14 - nfx * 9, car.angle);
-  }
-  if (car.hp < car.maxHp * 0.45 && !car.wrecked) {
-    car.smokeT -= dt;
-    if (car.smokeT <= 0) { smokePuff(car.x + nfx * 18, car.y + nfy * 18, car.hp < car.maxHp * 0.22); car.smokeT = 0.14; }
-  }
-  return impact;
-}
-
-export function damageCar(car, amount, x = car.x, y = car.y) {
+export function damageCar(car, amount, x, y) {
   if (car.wrecked) return;
   car.hp -= amount;
-  sparks(x, y);
-  if (car.hp <= 0) {
-    car.hp = 0;
-    car.wrecked = true;
-    smokePuff(car.x, car.y, true);
-    addShake(7);
-    sfx('crash');
+  burst(x ?? car.x, y ?? car.y, 6, "#ffb347");
+  if (car.hp <= 0) { car.hp = 0; car.wrecked = true; burst(car.x, car.y, 26, "#555"); G.shake = Math.max(G.shake, 7); }
+}
+
+export function stepCar(car, dt, input) {
+  if (car.wrecked) { car.vx *= 0.9; car.vy *= 0.9; car.x += car.vx * dt; car.y += car.vy * dt; return; }
+  const fwdX = Math.cos(car.angle), fwdY = Math.sin(car.angle);
+  const fwdSpeed = car.vx * fwdX + car.vy * fwdY;
+  let steer = 0;
+  if (input.left) steer -= 1;
+  if (input.right) steer += 1;
+  const steerPower = clamp(Math.abs(fwdSpeed) / 90, 0, 1) * (fwdSpeed < 0 ? -1 : 1);
+  car.angle += steer * 2.15 * steerPower * dt * (input.drift ? 1.45 : 1);
+  if (input.up) car.speed = Math.min(car.type.top, (fwdSpeed + car.type.accel * dt));
+  else if (input.down) car.speed = Math.max(-110, fwdSpeed - 240 * dt);
+  else car.speed = fwdSpeed * Math.pow(0.55, dt);
+  if (input.drift) car.speed *= Math.pow(0.82, dt);
+  const grip = input.drift ? 0.86 : car.type.grip;
+  const latX = -fwdY, latY = fwdX;
+  const latSpeed = car.vx * latX + car.vy * latY;
+  const nfX = Math.cos(car.angle), nfY = Math.sin(car.angle);
+  car.vx = nfX * car.speed + latX * latSpeed * grip;
+  car.vy = nfY * car.speed + latY * latSpeed * grip;
+  const nx = car.x + car.vx * dt, ny = car.y + car.vy * dt;
+  if (collidesBuilding(nx, ny, 20)) {
+    const impact = Math.abs(car.speed);
+    if (impact > 120) damageCar(car, impact * 0.06, nx, ny);
+    if (impact > 60) G.shake = Math.max(G.shake, 3);
+    car.speed *= -0.25; car.vx *= -0.25; car.vy *= -0.25;
+  } else { car.x = nx; car.y = ny; }
+  car.x = clamp(car.x, 30, 3570); car.y = clamp(car.y, 30, 3570);
+  if (car.hp < 45) {
+    car.smokeTimer -= dt;
+    if (car.smokeTimer <= 0) { car.smokeTimer = 0.12; burst(car.x, car.y, 1, car.hp < 20 ? "#333" : "#bbb"); }
+  }
+  if (Math.abs(latSpeed) > 55 && Math.abs(car.speed) > 60) {
+    G.skids.push({ x: car.x - nfX * 14, y: car.y - nfY * 14, life: 6 });
+    if (G.skids.length > 420) G.skids.splice(0, G.skids.length - 420);
   }
 }
 
-// Simple car-vs-car separation: overlapping cars push apart and trade a
-// little damage at speed. Runs over all pairs; the city never holds enough
-// cars for the quadratic cost to matter.
-export function collideCars(dt) {
-  const cars = G.cars;
-  for (let i = 0; i < cars.length; i++) {
-    const a = cars[i];
-    for (let j = i + 1; j < cars.length; j++) {
-      const b = cars[j];
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const d2 = dx * dx + dy * dy;
-      const minD = 40;
-      if (d2 > minD * minD || d2 < 0.01) continue;
-      const d = Math.sqrt(d2);
-      const push = (minD - d) / 2;
-      const nx = dx / d, ny = dy / d;
-      a.x -= nx * push; a.y -= ny * push;
-      b.x += nx * push; b.y += ny * push;
-      const rel = Math.abs((b.vx - a.vx) * nx + (b.vy - a.vy) * ny);
-      if (rel > 120) {
-        damageCar(a, rel * 0.07, a.x + nx * 18, a.y + ny * 18);
-        damageCar(b, rel * 0.07, b.x - nx * 18, b.y - ny * 18);
-        if (a.driver === 'player' || b.driver === 'player') { addShake(6); sfx('crash'); }
-      }
-      // Trade a slice of velocity along the impact normal so shunts feel
-      // physical, then bleed speed overall — crashes should cost momentum.
-      const impulse = ((b.vx - a.vx) * nx + (b.vy - a.vy) * ny) * 0.35;
-      a.vx += nx * impulse; a.vy += ny * impulse;
-      b.vx -= nx * impulse; b.vy -= ny * impulse;
-      a.vx *= 0.92; a.vy *= 0.92; b.vx *= 0.92; b.vy *= 0.92;
-    }
-  }
-}
-
-export function drawCar(ctx, car, camX, camY) {
-  const sx = car.x - camX, sy = car.y - camY;
-  ctx.save();
-  ctx.translate(sx, sy);
-  ctx.rotate(car.angle);
-  const w = car.w, h = car.h;
-  // Shadow, then body.
-  ctx.fillStyle = 'rgba(30,25,15,0.35)';
-  ctx.fillRect(-w / 2 + 3, -h / 2 + 5, w, h);
-  ctx.fillStyle = car.wrecked ? '#2c2c30' : car.color;
-  roundRect(ctx, -w / 2, -h / 2, w, h, 6); ctx.fill();
-  if (car.isCop) {
-    ctx.fillStyle = '#e8ecf0';
-    ctx.fillRect(-w * 0.18, -h / 2, w * 0.36, h);
-    ctx.fillStyle = '#18222e';
-    ctx.font = 'bold 7px system-ui, sans-serif';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('POLICÍA', 0, 0);
-  }
-  if (car.type === 'taxi') {
-    ctx.fillStyle = '#20242a';
-    ctx.fillRect(-6, -6, 12, 12);
-    ctx.fillStyle = '#f2b705';
-    ctx.font = 'bold 6px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('TAXI', 0, 2);
-  }
-  // Cabin glass.
-  ctx.fillStyle = car.wrecked ? '#17181c' : 'rgba(28,44,60,0.9)';
-  roundRect(ctx, -w * 0.16, -h * 0.36, w * 0.34, h * 0.72, 4); ctx.fill();
-  ctx.fillStyle = 'rgba(160,200,225,0.5)';
-  ctx.fillRect(w * 0.10, -h * 0.32, 3, h * 0.64);
-  // Wheels.
-  ctx.fillStyle = '#14151a';
-  for (const [wx, wy] of [[-w * 0.32, -h / 2 - 2], [w * 0.32, -h / 2 - 2], [-w * 0.32, h / 2 - 2], [w * 0.32, h / 2 - 2]]) {
-    ctx.fillRect(wx - 5, wy, 10, 4);
-  }
-  // Headlights.
-  ctx.fillStyle = '#ffeebb';
-  ctx.fillRect(w / 2 - 2, -h * 0.32, 3, 5);
-  ctx.fillRect(w / 2 - 2, h * 0.32 - 5, 3, 5);
-  ctx.fillStyle = '#c0392b';
-  ctx.fillRect(-w / 2 - 1, -h * 0.32, 3, 5);
-  ctx.fillRect(-w / 2 - 1, h * 0.32 - 5, 3, 5);
-  // Police light bar flashes red/blue.
-  if (car.isCop && !car.wrecked) {
-    const phase = Math.floor(G.time * 6 + car.lightPhase) % 2;
-    ctx.fillStyle = phase ? '#ff3b30' : '#2e7dff';
-    ctx.fillRect(-7, -h * 0.30, 14, 6);
-    ctx.fillStyle = phase ? '#2e7dff' : '#ff3b30';
-    ctx.fillRect(-7, h * 0.30 - 6, 14, 6);
-  }
-  // Damage smoke scorch marks.
-  if (car.hp < car.maxHp * 0.5) {
-    ctx.fillStyle = 'rgba(20,20,20,0.35)';
-    ctx.beginPath(); ctx.arc(w * 0.28, 0, 8, 0, Math.PI * 2); ctx.fill();
-  }
+export function drawCar(ctx, car) {
+  ctx.save(); ctx.translate(car.x, car.y); ctx.rotate(car.angle);
+  ctx.fillStyle = "rgba(0,0,0,0.25)"; ctx.fillRect(-car.w / 2 + 3, -car.h / 2 + 4, car.w, car.h);
+  ctx.fillStyle = car.wrecked ? "#3a3a3a" : car.color;
+  ctx.fillRect(-car.w / 2, -car.h / 2, car.w, car.h);
+  if (car.cop) { ctx.fillStyle = "#f4f6f8"; ctx.fillRect(-car.w / 2, -car.h / 2, car.w, car.h); ctx.fillStyle = "#22406e"; ctx.fillRect(-6, -car.h / 2, 13, car.h); ctx.fillStyle = "#e33"; ctx.fillRect(-2, -5, 5, 4); ctx.fillStyle = "#37e"; ctx.fillRect(-2, 1, 5, 4); }
+  ctx.fillStyle = "#bfe3ef"; ctx.fillRect(car.w * 0.08, -car.h / 2 + 3, 9, car.h - 6);
+  ctx.fillStyle = "#22303c"; ctx.fillRect(-car.w * 0.28, -car.h / 2 + 3, 8, car.h - 6);
+  ctx.fillStyle = "#14181d";
+  for (const [wx, wy] of [[-car.w / 2 + 7, -car.h / 2 - 2], [car.w / 2 - 7, -car.h / 2 - 2], [-car.w / 2 + 7, car.h / 2 - 2], [car.w / 2 - 7, car.h / 2 - 2]]) ctx.fillRect(wx - 4, wy, 8, 4);
+  if (car.locked) { ctx.fillStyle = "#ffd34d"; ctx.fillRect(-3, -3, 6, 6); }
   ctx.restore();
-  if (car.alarmT > 0) {
-    ctx.fillStyle = '#ff5a4d';
-    ctx.font = 'bold 12px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('!', sx, sy - 26 + Math.sin(G.time * 10) * 2);
+  if (car.alarm > 0 && Math.floor(car.alarm * 6) % 2 === 0) {
+    ctx.fillStyle = "#ffdf5e"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("!", car.x, car.y - 26);
   }
-}
-
-export function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
 }

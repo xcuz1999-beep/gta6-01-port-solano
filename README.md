@@ -1,76 +1,47 @@
 # Port Solano
 
-An original open-world crime game that runs in a desktop browser from static
-files — no build step, no dependencies, no network. Serve the `game/` folder
-with any static server (or run `node serve.ts` and open
-http://localhost:8080), and play with keyboard and mouse.
+A top-down open-world crime game that runs entirely in the browser — no
+build step, no dependencies, no network. Serve the `game/` folder with any
+static server (or run `node serve.ts` and open http://localhost:8080).
 
-## The story
-
-Reyes returns to Port Solano, a sun-baked coastal city of palm avenues and
-back-street garages. Fixer **Alba Ferrer** runs work out of her Chop Shop and
-needs a driver she can trust. Rival **Bruno Vane** and the **Vantrek** crew
-are squeezing the Marina, buying guns, and collecting debts that are not
-theirs. Six story missions take Reyes from a first borrowed ride to a final
-showdown at Marina Azul — with a weapon unlock, cash rewards, and the
-Policía Municipal taking an interest throughout.
-
-Places that matter: **Alba's Chop Shop** (story), **Clínica del Sol** (heal,
-and lose some heat), **Marina Azul** (deliveries and courier work),
-**Casa Reyes** (safehouse — rest and save), **Armería Solano** (weapons and
-ammo).
+You are **Reyes**, back in the sun-baked port city of Port Solano. Fixer
+**Alba Ferrer** has work for you; **Bruno Vane** and his Vantrek crew have
+other plans. Work the six-mission story, build your cash, and try not to
+let the Solano PD put you away.
 
 ## Controls
 
-| Keys | Action |
-| --- | --- |
-| WASD / arrows | Move / drive |
-| Mouse | Aim on foot |
-| Click / hold | Punch or shoot (SMG is automatic) |
-| E | Enter/exit a car, talk, buy, use a place |
-| Hold E | Break into a locked car (sets off the alarm) |
-| Shift | Run |
-| Space | Handbrake / drift |
-| 1 / 2 / 3, Q | Fists / Pistol / SMG, or cycle weapons |
-| Esc | Pause |
-| H | Help |
+- **WASD / arrows** — walk and drive
+- **E** — enter / exit a car (hold **E** next to a locked car to break in)
+- **Space** — handbrake drift · **Shift** — sprint
+- **Mouse** — aim · **click / F** — punch or shoot
+- **1 / 2 / 3** — fists / pistol / SMG
+- **Q** at a named zone — take the next story job (or a courier run)
+- **Esc** — pause · **M** — mute
 
-## Systems
+## What's in the city
 
-- **A living city**: a seeded road grid with buildings, sidewalks, a beach
-  and the sea; AI traffic that drives the network in right-hand lanes, and
-  pedestrians who stroll, flee danger, can be knocked down — and witness
-  crimes.
-- **Cars to steal and drive**: parked and moving traffic, locked cars with a
-  timed break-in and alarm, arcade physics with drifting, damage, smoke and
-  wrecks.
-- **Wanted & police**: one to five stars driven by witness reports; patrol
-  cars pursue and ram, officers deploy and shoot at high heat, a bust meter
-  fills when you are boxed in, and staying unseen cools the trail.
-- **Missions**: a six-mission story chain (talk, drive, fight and deliver
-  steps with gold markers and distance readouts) plus repeatable timed
-  courier runs.
-- **Combat**: fists, pistol and SMG against Vantrek gunmen who strafe and
-  shoot back.
-- **HUD & minimap**: cash, day/night clock, health, weapon and ammo, wanted
-  stars — and a live minimap with streets, water, police, pedestrians and
-  your objective.
-- **Save system**: localStorage saves with autosave, a safehouse save point,
-  and Continue on the title screen.
-- **Polish**: a full day cycle with dusk and lit windows at night, particles,
-  skid marks, screen shake, and procedural WebAudio — engine, sirens,
-  gunshots and UI, all synthesized, no audio files.
+- A seeded 3600px city: road grid, buildings with lit windows at night,
+  beach, sea and marina, palm avenues, and five named zones — Alba's Chop
+  Shop, Clínica del Sol, Marina Azul, Casa Reyes and Armería Solano.
+- Live traffic that drives the road network, parked cars (some locked,
+  with alarms), and pedestrians who stroll, flee danger and report crimes.
+- A 1–5 star wanted system: witness reports build heat, patrol cars
+  pursue and ram, officers get out and shoot at three stars and up, and a
+  bust meter fills when you are cornered. Lay low, or visit the clinic or
+  your safehouse, to clear the heat.
+- Combat with fists, a pistol and an unlockable SMG against Vantrek gunmen.
+- A six-mission story chain (talk, drive, fight and deliver jobs) paying
+  out up to a $7,500 finale, then endless courier runs.
+- HUD with cash, clock, health, weapon and wanted stars, a live minimap,
+  day/night tint, skid marks, particles and procedural WebAudio (engine,
+  sirens, gunshots, pickups) — plus a localStorage save with autosave.
 
-## Development hooks
+## Layout
 
-- `?shot=cover|chase|combat|drive&seed=1` — deterministic scenes used for the
-  screenshots in `screenshots/`.
-- `?test=1&seed=1` — a scripted playability self-test that logs
-  `SELFTEST ALL PASS` when movement, car entry/exit, driving, the wanted
-  system, save/load, mission start and pause all check out.
-
-## Hand-in
-
-`node main.ts` (with `MAKEFUN_OUTPUT_DIR` set outside the grader) copies
-`game/` and `screenshots/` to the output directory and writes `dossier.json`
-there using the kit's `buildDossier`.
+- `game/index.html` — the page; `game/src/` holds one module per system
+  (city, vehicles, traffic, pedestrians, player, combat, police, missions,
+  hud, save, audio, effects, plus boot, input, state, config and helpers).
+- `main.ts` — the make.fun hand-in program; `serve.ts` — the dev server.
+- Handy URLs: `?seed=7` for another city, `?shot=cover` (also `chase`,
+  `combat`, `drive`) for posed scenes, `?test=1` for the self-test.

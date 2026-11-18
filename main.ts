@@ -1,41 +1,30 @@
-// Port Solano — entrypoint for the make.fun gta6-01 competition.
-// Running `node main.ts` assembles the hand-in in the output directory
-// (MAKEFUN_OUTPUT_DIR, or /output on the grader): it copies the static game
-// and the screenshots across, then asks the kit library to write the
-// dossier that describes them. The two grader runs must produce identical
-// bytes, so nothing here depends on the clock, randomness or the network —
-// just the files in this repository, copied in sorted order.
+// Port Solano — main.ts, the make.fun hand-in program.
+// Copies the static game and its screenshots into the output directory
+// (MAKEFUN_OUTPUT_DIR locally, /output on the grader) and writes the
+// dossier with the kit library. Deterministic: sorted copies only, no
+// clock, no randomness, no network, so both grader runs agree byte for
+// byte.
 
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildDossier } from "./vendor/makefun-game.ts";
 
-const repoRoot = dirname(fileURLToPath(import.meta.url));
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
+const here = dirname(fileURLToPath(import.meta.url));
+const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
+const CAPS = { text_max_bytes: 163840, screenshots: { max: 4, max_bytes: 262144 }, game_max_files: 993, game_max_bytes: 50331648 };
 
-// The dossier's text budget: the kit caps the source text it embeds at
-// 160 KiB, which comfortably holds Port Solano's hand-written modules.
-const DOSSIER_CAPS = { text_max_bytes: 163840 };
-
-function stageDirectory(name: string): void {
-  const from = join(repoRoot, name);
-  const to = join(outputDir, name);
-  if (!existsSync(from)) {
-    throw new Error(`main.ts: expected a ${name}/ directory beside main.ts`);
-  }
-  rmSync(to, { recursive: true, force: true });
-  cpSync(from, to, { recursive: true });
+function copyTree(name: string): void {
+  const src = join(here, name);
+  const dst = join(outDir, name);
+  if (!existsSync(src)) throw new Error("main.ts: missing " + name + "/ next to main.ts");
+  rmSync(dst, { recursive: true, force: true });
+  cpSync(src, dst, { recursive: true });
 }
 
-mkdirSync(outputDir, { recursive: true });
-stageDirectory("game");
-stageDirectory("screenshots");
-
-// buildDossier reads game/ and screenshots/ from the directory it is given
-// and returns the exact dossier bytes; writing them untouched is what lets
-// the gate's rebuild match this file byte for byte.
-const dossierBytes = buildDossier(outputDir, DOSSIER_CAPS);
-writeFileSync(join(outputDir, "dossier.json"), dossierBytes);
-
-console.log(`Port Solano handed in: game/ + screenshots/ + dossier.json (${dossierBytes.length} bytes) -> ${outputDir}`);
+mkdirSync(outDir, { recursive: true });
+copyTree("game");
+copyTree("screenshots");
+const dossier = buildDossier(outDir, CAPS);
+writeFileSync(join(outDir, "dossier.json"), dossier);
+console.log("Port Solano: wrote game/, screenshots/ and dossier.json (" + dossier.length + " bytes) to " + outDir);

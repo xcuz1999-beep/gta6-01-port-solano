@@ -1,284 +1,190 @@
 // Port Solano — main.js
-// Boot and the frame loop: build the seeded world, wire the menus, run the
-// simulation in the right order (player, traffic, peds, combat, police,
-// missions, effects), follow Reyes with the camera, and render the city,
-// its people and the HUD. Also owns the day clock, autosave, postcard
-// moments, and the ?shot= / ?test= deterministic hooks.
+// Boot and the frame loop: build the seeded world, wire input and menus,
+// step every system in a fixed order, then render world, actors and HUD.
 
-import { VIEW_W, VIEW_H, WORLD_SIZE, DAY_LENGTH_SECONDS, AUTOSAVE_SECONDS } from './config.js';
-import { G, resetPlayer, toast, showBanner } from './state.js';
-import { Rng, clamp } from './random.js';
-import { attachInput, keys, consume, mouse, endFrameInput } from './input.js';
-import { initAudio, sfx, setSiren } from './audio.js';
-import { generateCity, drawCity } from './city.js';
-import { spawnTraffic, spawnParkedCars, updateTraffic, maintainTraffic } from './traffic.js';
-import { spawnPeds, updatePeds, drawPed } from './pedestrians.js';
-import { updatePlayer, drawPlayer, playerPos } from './player.js';
-import { tryPlayerShoot, updateGunmen, updateBullets, drawGunman, drawBullets } from './combat.js';
-import { commitCrime, updatePolice, drawOfficer, clearWanted } from './police.js';
-import { updateMissions, drawMissionMarker } from './missions.js';
-import { updateEffects, drawEffects, drawDayTint, nightFactor } from './effects.js';
-import { drawCar, collideCars } from './vehicles.js';
-import { drawHUD } from './hud.js';
-import { saveGame, loadGame, applySave, hasSave, wipeSave } from './save.js';
-import { setupShot } from './shots.js';
-import { runSelfTest } from './selftest.js';
+import { WORLD_SIZE, DAY_LENGTH, ZONES } from "./config.js";
+import { G, toast, earnPostcard } from "./state.js";
+import { bindInput, pressed, mouse, clearPressed } from "./input.js";
+import { ensureAudio, updateAudio, sfx } from "./audio.js";
+import { buildCity, drawCity } from "./city.js";
+import { drawCar } from "./vehicles.js";
+import { updateEffects, drawEffects, drawTint } from "./effects.js";
+import { spawnTraffic, updateTraffic } from "./traffic.js";
+import { spawnPeds, updatePeds, drawPed, witnessCrime } from "./pedestrians.js";
+import { makePlayer, updatePlayer, drawPlayer } from "./player.js";
+import { playerAttack, updateCombat, drawGunman, drawBullets } from "./combat.js";
+import { updatePolice, clearHeat } from "./police.js";
+import { updateMissions, startStoryMission, startCourier, STORY } from "./missions.js";
+import { drawHUD, drawScreens } from "./hud.js";
+import { saveGame, loadGame, applySave, hasSave, clearSave } from "./save.js";
+import { setupShot } from "./shots.js";
+import { runSelfTest } from "./selftest.js";
+import { dist, clamp } from "./random.js";
 
-const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-const params = new URLSearchParams(window.location.search);
-const SEED = parseInt(params.get('seed') || '1', 10) || 1;
+window.__psPed = { witnessCrime };
 
-G.commitCrime = commitCrime;
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const params = new URLSearchParams(location.search);
+const seed = parseInt(params.get("seed") || "1", 10) || 1;
+const cam = { x: 800, y: 800 };
 
-function buildWorld() {
-  G.rng = new Rng(SEED * 7919 + 13);
-  G.fxRng = new Rng(SEED * 104729 + 7);
-  G.cars = []; G.peds = []; G.officers = []; G.gunmen = []; G.bullets = [];
-  G.particles = []; G.skids = []; G.texts = []; G.reports = []; G.toasts = [];
-  generateCity(G.rng);
-  resetPlayer(600, 800);
-  spawnParkedCars(G.rng);
-  spawnTraffic(G.rng);
-  spawnPeds(G.rng);
-  G.camera.x = clamp(G.player.x - VIEW_W / 2, 0, WORLD_SIZE - VIEW_W);
-  G.camera.y = clamp(G.player.y - VIEW_H / 2, 0, WORLD_SIZE - VIEW_H);
+export function newGame(fromSave) {
+  buildCity(seed);
+  G.player = makePlayer(660, 660);
+  G.cars = spawnTraffic(seed);
+  G.peds = spawnPeds(seed);
+  G.cops = []; G.gunmen = []; G.bullets = []; G.particles = []; G.floaters = []; G.skids = [];
+  G.cash = 120; G.heat = 0; G.wanted = 0; G.bust = 0; G.storyIndex = 0; G.courierCount = 0;
+  G.weapons = { pistol: false, smg: false }; G.ammo = { pistol: 0, smg: 0 }; G.weapon = "fists";
+  G.postcards = []; G.mission = null; G.clock = 0.32; G.breakIn = null;
+  if (fromSave) { const data = loadGame(); if (data) applySave(data); }
+  G.mode = "playing";
+  toast(fromSave ? "Welcome back to Port Solano." : "Reyes arrives in Port Solano. Find Alba at the Chop Shop.");
 }
 
-function resetProgress() {
-  G.cash = 120;
-  G.clock = 9 * 60 + 20;
-  G.day = 1;
-  G.wanted = 0; G.heat = 0; G.bust = 0;
-  G.weapon = 'fists';
-  G.owned = { fists: true, pistol: false, smg: false };
-  G.ammo = { pistol: 0, smg: 0 };
-  G.missionIndex = 0; G.mission = null; G.courier = null; G.storyDone = false;
-  G.postcards = [];
-  G.stats = { stolen: 0, knockdowns: 0, shotsFired: 0, missionsDone: 0, earned: 0 };
+export function togglePause() {
+  if (G.mode === "playing") G.mode = "paused";
+  else if (G.mode === "paused" || G.mode === "help") G.mode = "playing";
 }
 
-function startNewGame() {
-  buildWorld();
-  resetProgress();
-  G.mode = 'playing';
-  showBanner('Port Solano', 'Reyes is back in town. Alba Ferrer has work — follow the gold marker.');
-  toast('WASD move · Mouse aim · E interact · Esc pause', '#cfe0e4');
-  syncScreens();
-}
-
-function continueGame() {
-  const data = loadGame();
-  buildWorld();
-  resetProgress();
-  if (data) applySave(data);
-  G.mode = 'playing';
-  showBanner('Port Solano', 'Welcome back, Reyes.');
-  syncScreens();
-}
-
-function togglePause() {
-  if (G.mode === 'playing') { G.mode = 'paused'; saveGame(); }
-  else if (G.mode === 'paused' || G.mode === 'help') G.mode = 'playing';
-  syncScreens();
-}
-
-function respawnAfterEnd() {
-  // Busted costs a fine and the heat; wasted costs a clinic bill. Either
-  // way Reyes wakes at the Clínica with the story intact.
-  const fine = G.mode === 'busted' ? Math.min(300, Math.floor(G.cash * 0.25)) : 150;
-  G.cash = Math.max(0, G.cash - fine);
-  clearWanted();
-  const clinica = G.zones.find((z) => z.id === 'clinica');
-  const p = G.player;
-  if (p.car) { p.car.driver = null; p.car = null; }
-  p.x = clinica.x + 30; p.y = clinica.y + 40;
-  p.hp = p.maxHp;
-  p.dead = false;
-  G.bust = 0;
-  G.mode = 'playing';
-  toast(G.mode === 'playing' ? 'Back on the street. -$' + fine : '', '#ff8a7a');
-  saveGame();
-  syncScreens();
-}
-
-// Postcards: small collectible moments for simply being somewhere.
-const POSTCARD_SPOTS = [
-  { name: 'First sunrise over Marina Azul', test: (pos) => pos.y > 3050 && G.clock > 300 && G.clock < 480 },
-  { name: 'Night owl of Port Solano', test: () => G.clock > 1380 || G.clock < 120 },
-  { name: 'Beach avenue cruiser', test: (pos) => pos.y > 2900 && !!G.player.car },
-  { name: 'Home sweet Casa Reyes', test: (pos) => Math.hypot(pos.x - 2600, pos.y - 600) < 90 },
-];
-
-function checkPostcards() {
-  const pos = playerPos();
-  if (!pos) return;
-  for (const spot of POSTCARD_SPOTS) {
-    if (!G.postcards.includes(spot.name) && spot.test(pos)) {
-      G.postcards.push(spot.name);
-      toast('Postcard: ' + spot.name, '#9fc2ff');
-      sfx('unlock');
+function zoneActions() {
+  const pl = G.player; if (!pl || pl.car) return;
+  for (const z of ZONES) {
+    if (dist(pl.x, pl.y, z.x, z.y) > 46) continue;
+    if (z.id === "clinic" && (pl.hp < pl.maxHp || G.wanted > 0)) {
+      pl.hp = pl.maxHp; clearHeat(); toast("Clinica del Sol patched you up. Heat cleared.");
+      earnPostcard("clinic", "Clinica del Sol");
+    } else if (z.id === "safehouse") { saveGame(); clearHeat(); toast("Saved at Casa Reyes. Heat cleared."); earnPostcard("casa", "Casa Reyes"); }
+    else if (z.id === "gunshop") {
+      if (!G.weapons.pistol) { if (G.cash >= 150) { G.cash -= 150; G.weapons.pistol = true; G.ammo.pistol += 48; toast("Bought a pistol at Armeria Solano."); } else toast("Pistol costs $150."); }
+      else { G.ammo.pistol += 24; G.ammo.smg += G.weapons.smg ? 60 : 0; toast("Ammo topped up."); }
+      earnPostcard("armeria", "Armeria Solano");
+    } else if (z.id === "marina") earnPostcard("marina", "Marina Azul");
+    else if (z.id === "chopshop") earnPostcard("chop", "Alba's Chop Shop");
+    if (pressed.KeyQ && !G.mission) {
+      if (G.storyIndex < STORY.length) startStoryMission(G.storyIndex);
+      else startCourier();
     }
   }
 }
 
-function update(dt) {
+let interactHint = "";
+function step(dt) {
   G.time += dt;
-  // Escape must work from pause too, so it is consumed before the mode gate.
-  if ((G.mode === 'playing' || G.mode === 'paused') && consume('Escape')) togglePause();
-  if (G.mode !== 'playing') { updateEffects(dt); return; }
-
-  // The day clock: a full day every DAY_LENGTH_SECONDS.
-  G.clock += (dt / DAY_LENGTH_SECONDS) * 1440;
-  if (G.clock >= 1440) { G.clock -= 1440; G.day++; }
-
-  G.mouse.wx = G.camera.x + mouse.x;
-  G.mouse.wy = G.camera.y + mouse.y;
-  G.mouse.down = mouse.down;
-
+  if (G.mode !== "playing") return;
+  G.clock = (G.clock + dt / DAY_LENGTH) % 1;
+  G.messageTimer = Math.max(0, G.messageTimer - dt);
+  G.bannerTimer = Math.max(0, G.bannerTimer - dt);
+  window.__psMouseDown = mouse.down || !!pressed.KeyF;
+  // weapon switching
+  if (pressed.Digit1) G.weapon = "fists";
+  if (pressed.Digit2 && G.weapons.pistol) G.weapon = "pistol";
+  if (pressed.Digit3 && G.weapons.smg) G.weapon = "smg";
+  if (pressed.KeyM) { G.muted = !G.muted; toast(G.muted ? "Sound off" : "Sound on"); }
+  mouse.wx = cam.x + mouse.x; mouse.wy = cam.y + mouse.y;
   updatePlayer(dt);
-  if (consume('Escape')) { togglePause(); return; }
-  // Combat input: click (or hold for the SMG) fires toward the mouse.
-  if (!G.player.car && !G.player.dead) {
-    tryPlayerShoot(G.mouse.wx, G.mouse.wy, mouse.down, mouse.down && !update.wasDown);
-  }
-  update.wasDown = mouse.down;
-
+  playerAttack(dt, mouse.wx, mouse.wy);
   updateTraffic(dt);
-  maintainTraffic(dt);
   updatePeds(dt);
-  updateGunmen(dt);
-  updateBullets(dt);
+  updateCombat(dt);
   updatePolice(dt);
-  collideCars(dt);
   updateMissions(dt);
+  zoneActions();
+  for (const cop of G.cops) cop.alarm = Math.max(0, (cop.alarm || 0) - dt);
+  for (const car of G.cars) car.alarm = Math.max(0, (car.alarm || 0) - dt);
   updateEffects(dt);
-  checkPostcards();
-
-  // Death check.
-  if (G.player.dead && G.mode === 'playing') {
-    G.mode = 'wasted';
-    sfx('fail');
-    syncScreens();
-  }
-
-  // Siren follows the nearest live patrol car.
-  let siren = false;
-  if (G.wanted > 0) {
-    const pos = playerPos();
-    for (const car of G.cars) {
-      if (car.isCop && car.driver === 'cop' && Math.hypot(car.x - pos.x, car.y - pos.y) < 700) siren = true;
-    }
-  }
-  setSiren(siren);
-
-  // Camera: follow with a speed look-ahead while driving.
-  const focus = G.player.car || G.player;
-  const lookX = G.player.car ? G.player.car.vx * 0.42 : 0;
-  const lookY = G.player.car ? G.player.car.vy * 0.42 : 0;
-  const tx = clamp(focus.x + lookX - VIEW_W / 2, 0, WORLD_SIZE - VIEW_W);
-  const ty = clamp(focus.y + lookY - VIEW_H / 2, 0, WORLD_SIZE - VIEW_H);
-  G.camera.x += (tx - G.camera.x) * Math.min(1, dt * 5);
-  G.camera.y += (ty - G.camera.y) * Math.min(1, dt * 5);
-
-  // Autosave.
-  G.autosaveT += dt;
-  if (G.autosaveT >= AUTOSAVE_SECONDS) { G.autosaveT = 0; saveGame(); }
+  // mission auto-offer at chop shop when idle
+  interactHint = "";
+  const pl = G.player;
+  if (pl.hp <= 0) { G.mode = "wasted"; sfx.stinger(false); }
+  const speedRatio = pl.car ? Math.min(1, Math.hypot(pl.car.vx, pl.car.vy) / 300) : 0;
+  updateAudio(speedRatio, G.cops.some((c) => dist(c.x, c.y, pl.x, pl.y) < 500));
+  // camera with speed look-ahead
+  const lookX = pl.car ? pl.car.vx * 0.55 : 0, lookY = pl.car ? pl.car.vy * 0.55 : 0;
+  cam.x = clamp(pl.x + lookX - canvas.width / 2, 0, Math.max(0, WORLD_SIZE - canvas.width));
+  cam.y = clamp(pl.y + lookY - canvas.height / 2, 0, Math.max(0, WORLD_SIZE - canvas.height));
 }
-update.wasDown = false;
 
 function render() {
-  const shakeX = G.shake ? (Math.random() - 0.5) * G.shake : 0;
-  const shakeY = G.shake ? (Math.random() - 0.5) * G.shake : 0;
-  const camX = G.camera.x + shakeX, camY = G.camera.y + shakeY;
-  const lit = nightFactor();
-  drawCity(ctx, camX, camY, VIEW_W, VIEW_H, lit);
-  drawMissionMarker(ctx, camX, camY, VIEW_W, VIEW_H);
-  drawEffects(ctx, camX, camY, VIEW_W, VIEW_H);
-  for (const ped of G.peds) {
-    if (ped.x < camX - 40 || ped.y < camY - 40 || ped.x > camX + VIEW_W + 40 || ped.y > camY + VIEW_H + 40) continue;
-    drawPed(ctx, ped, camX, camY);
+  ctx.save();
+  const shX = (Math.random() - 0.5) * G.shake, shY = (Math.random() - 0.5) * G.shake;
+  ctx.translate(-Math.round(cam.x + shX), -Math.round(cam.y + shY));
+  drawCity(ctx, cam, canvas.width, canvas.height, G.clock);
+  for (const car of G.cars) drawCar(ctx, car);
+  for (const p of G.peds) drawPed(ctx, p);
+  for (const g of G.gunmen) drawGunman(ctx, g);
+  for (const cop of G.cops) if (cop.copAI && cop.copAI.officer) {
+    const o = cop.copAI.officer;
+    ctx.fillStyle = "#22406e"; ctx.beginPath(); ctx.arc(o.x, o.y, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#e8b88a"; ctx.beginPath(); ctx.arc(o.x, o.y - 2, 5, 0, Math.PI * 2); ctx.fill();
   }
-  for (const car of G.cars) {
-    if (car.x < camX - 70 || car.y < camY - 70 || car.x > camX + VIEW_W + 70 || car.y > camY + VIEW_H + 70) continue;
-    drawCar(ctx, car, camX, camY);
+  drawPlayer(ctx);
+  drawBullets(ctx);
+  drawEffects(ctx);
+  // mission marker beacon
+  if (G.mission) {
+    const stepDef = G.mission.def.steps[G.mission.step];
+    if (stepDef) {
+      ctx.strokeStyle = "#ffd34d"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(stepDef.x, stepDef.y, 30 + Math.sin(G.time * 4) * 5, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = "#ffd34d"; ctx.fillRect(stepDef.x - 2, stepDef.y - 90, 4, 55);
+    }
   }
-  for (const g of G.gunmen) drawGunman(ctx, g, camX, camY);
-  for (const o of G.officers) drawOfficer(ctx, o, camX, camY);
-  drawPlayer(ctx, camX, camY);
-  drawBullets(ctx, camX, camY);
-  drawDayTint(ctx, VIEW_W, VIEW_H);
-  if (G.mode !== 'title') drawHUD(ctx, VIEW_W, VIEW_H);
+  ctx.restore();
+  drawTint(ctx, canvas.width, canvas.height, G.clock);
+  if (G.mode !== "title") drawHUD(ctx, canvas.width, canvas.height);
+  drawScreens(ctx, canvas.width, canvas.height);
+  if (G.mode === "playing" && G.player && !G.player.car) {
+    ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.font = "13px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("Q at a zone — take a job · E — car · click — fight", canvas.width / 2, canvas.height - 12);
+  }
 }
 
-// ------------------------------------------------------------ menu screens
-const screens = {
-  title: document.getElementById('titleScreen'),
-  pause: document.getElementById('pauseScreen'),
-  help: document.getElementById('helpScreen'),
-  end: document.getElementById('endScreen'),
-};
-const endTitle = document.getElementById('endTitle');
-const endText = document.getElementById('endText');
-const continueBtn = document.getElementById('continueBtn');
-
-function syncScreens() {
-  screens.title.style.display = G.mode === 'title' ? 'flex' : 'none';
-  screens.pause.style.display = G.mode === 'paused' ? 'flex' : 'none';
-  screens.help.style.display = G.mode === 'help' ? 'flex' : 'none';
-  const ended = G.mode === 'busted' || G.mode === 'wasted' || G.mode === 'complete';
-  screens.end.style.display = ended ? 'flex' : 'none';
-  if (G.mode === 'busted') { endTitle.textContent = 'BUSTED'; endText.textContent = 'The Policía Municipal boxed Reyes in. A fine, a night in the cells, and the heat is gone.'; }
-  if (G.mode === 'wasted') { endTitle.textContent = 'WASTED'; endText.textContent = 'Reyes wakes up at Clínica del Sol with a bill and a headache.'; }
-  if (G.mode === 'complete') { endTitle.textContent = 'SOLANO GOODBYE'; endText.textContent = 'Bruno Vane is finished, Alba pays the last envelope, and Port Solano is quiet — for now. Courier work at the Marina never ends. Missions done: ' + G.stats.missionsDone + ' · Earned: $' + G.stats.earned.toLocaleString('en-US'); }
-  if (continueBtn) continueBtn.style.display = hasSave() ? 'block' : 'none';
+function menuKeys() {
+  if (G.mode === "title") {
+    if (pressed.KeyN) { clearSave(); newGame(false); sfx.ui(); }
+    if (pressed.KeyC && hasSave()) { newGame(true); sfx.ui(); }
+    if (pressed.KeyH) G.mode = "help";
+  } else if (G.mode === "help" && (pressed.Escape || pressed.Enter)) G.mode = G.player ? "paused" : "title";
+  else if (G.mode === "paused") {
+    if (pressed.KeyS) { saveGame(); toast("Saved."); G.mode = "playing"; }
+    if (pressed.KeyR) newGame(false);
+    if (pressed.KeyH) G.mode = "help";
+  } else if ((G.mode === "busted" || G.mode === "wasted" || G.mode === "complete") && pressed.Enter) {
+    if (G.mode === "busted") { G.cash = Math.max(0, G.cash - 150); clearHeat(); G.cops = []; G.cars = G.cars.filter((c) => !c.cop); }
+    if (G.mode === "wasted") { G.cash = Math.max(0, G.cash - 100); G.player.hp = 70; G.player.x = 3000; G.player.y = 660; clearHeat(); }
+    G.mode = "playing";
+  }
 }
 
-window.PS = {
-  startNewGame,
-  continueGame,
-  togglePause,
-  respawnAfterEnd,
-  showHelp() { G.modeBeforePause = G.mode; G.mode = 'help'; syncScreens(); },
-  backFromHelp() { G.mode = G.modeBeforePause === 'help' ? 'title' : G.modeBeforePause; if (G.mode === 'title' && !G.player) G.mode = 'title'; syncScreens(); },
-  saveAndTitle() { saveGame(); G.mode = 'title'; syncScreens(); },
-  wipeAndNew() { wipeSave(); startNewGame(); },
-};
-document.getElementById('newBtn').addEventListener('click', () => { initAudio(); sfx('ui'); startNewGame(); });
-if (continueBtn) continueBtn.addEventListener('click', () => { initAudio(); sfx('ui'); continueGame(); });
-document.getElementById('resumeBtn').addEventListener('click', () => { sfx('ui'); togglePause(); });
-document.getElementById('pauseSaveBtn').addEventListener('click', () => { saveGame(); toast('Saved.', '#7be495'); sfx('ui'); });
-document.getElementById('pauseHelpBtn').addEventListener('click', () => { window.PS.showHelp(); });
-document.getElementById('helpBackBtn').addEventListener('click', () => { window.PS.backFromHelp(); });
-document.getElementById('endBtn').addEventListener('click', () => { respawnAfterEnd(); });
-canvas.addEventListener('mousedown', () => initAudio());
-window.addEventListener('keydown', (e) => {
-  initAudio();
-  if (e.code === 'Escape' && G.mode === 'help') window.PS.backFromHelp();
-  if (e.code === 'KeyH' && G.mode === 'playing') window.PS.showHelp();
-  void keys;
-});
+// boot: a quiet world behind the title screen
+buildCity(seed);
+G.player = makePlayer(660, 660);
+G.cars = spawnTraffic(seed);
+G.peds = spawnPeds(seed);
+cam.x = clamp(G.player.x - canvas.width / 2, 0, WORLD_SIZE - canvas.width);
+cam.y = clamp(G.player.y - canvas.height / 2, 0, WORLD_SIZE - canvas.height);
 
-// ------------------------------------------------------------------- boot
-buildWorld();
-resetProgress();
-G.mode = 'title';
-const shotName = params.get('shot');
+bindInput(canvas, () => { ensureAudio(); togglePause(); });
+canvas.addEventListener("mousedown", ensureAudio);
+addEventListener("keydown", ensureAudio);
+
+const shotName = params.get("shot");
 if (shotName) setupShot(shotName);
-syncScreens();
 
 let last = performance.now();
 function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000);
-  last = now;
-  if (params.get('test') === '1' && !frame.testDone) {
-    frame.testDone = true;
-    startNewGame();
-    runSelfTest(window.PS);
-  }
-  update(dt);
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  menuKeys();
+  step(dt);
   render();
-  endFrameInput();
-  window.requestAnimationFrame(frame);
+  clearPressed();
+  requestAnimationFrame(frame);
 }
-window.requestAnimationFrame(frame);
+requestAnimationFrame(frame);
+
+if (params.get("test") === "1") {
+  const api = { newGame: () => newGame(false), step, togglePause };
+  setTimeout(() => runSelfTest(api), 350);
+}
