@@ -12,7 +12,7 @@ import { G } from "./state.js";
 export function spawnTraffic(seed) {
   const rng = makeRng(seed * 331 + 7);
   const cars = [];
-  for (let i = 0; i < 14; i++) {
+  for (let i = 0; i < 22; i++) {
     const horizontal = rng() < 0.5;
     const lane = pick(rng, city.roads);
     const along = 200 + rng() * 3200;
@@ -26,7 +26,7 @@ export function spawnTraffic(seed) {
     cars.push(car);
   }
   // parked cars near block edges; roughly half are unlocked
-  for (let i = 0; i < 26; i++) {
+  for (let i = 0; i < 34; i++) {
     const horizontal = rng() < 0.5;
     const lane = pick(rng, city.roads);
     const along = 160 + rng() * 3250;
@@ -45,6 +45,17 @@ export function updateTraffic(dt) {
     if (car.pause > 0) { car.pause -= dt; stepCar(car, dt, {}); continue; }
     const nearIntersection = city.roads.some((c) => Math.abs((car.ai.horizontal ? car.x : car.y) - c) < 60);
     if (nearIntersection && Math.random() < dt * 0.5) car.pause = 0.5 + Math.random() * 0.7;
+    // simple braking: coast when the player's car or another car is
+    // sitting in the space just ahead of the nose
+    const aheadX = car.x + Math.cos(car.angle) * 44, aheadY = car.y + Math.sin(car.angle) * 44;
+    let blocked = false;
+    const playerCar = G.player && G.player.car;
+    if (playerCar && playerCar !== car && Math.hypot(playerCar.x - aheadX, playerCar.y - aheadY) < 36) blocked = true;
+    if (!blocked) for (const other of G.cars) {
+      if (other === car || other.wrecked) continue;
+      if (Math.hypot(other.x - aheadX, other.y - aheadY) < 36) { blocked = true; break; }
+    }
+    if (blocked) { stepCar(car, dt, {}); continue; }
     const input = { up: carSpeed(car) < 150, down: false, left: false, right: false, drift: false };
     // turn at world edges / intersections occasionally
     if ((car.ai.horizontal && (car.x < 120 || car.x > WORLD_SIZE - 120)) || (!car.ai.horizontal && (car.y < 120 || car.y > WORLD_SIZE - 120))) {

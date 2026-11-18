@@ -1,7 +1,8 @@
 // Port Solano — shots.js
 // Deterministic screenshot scenes for ?shot=<name>&seed=1. Each scene
 // poses the live game (never a fake render): the cover on foot downtown,
-// a three-star chase, a gun-shop shootout, and a beach-avenue drive.
+// a four-star chase under the PD helicopter, a gun-shop shootout, and a
+// beach-avenue drive.
 
 import { G, banner } from "./state.js";
 import { makeRng } from "./random.js";
@@ -22,8 +23,14 @@ export function setupShot(name) {
     const car = makeCar(1800, 1800, -0.4, rng, {});
     car.color = "#e8b13a"; G.cars.push(car); enterCar(car);
     car.vx = 190; car.vy = -60;
-    G.heat = 60;
-    banner("Three stars — lose the Solano PD");
+    G.heat = 95;
+    banner("Four stars — PD helicopter overhead");
+    G.heli = { x: pl.x - 150, y: pl.y - 170, angle: 0.8 };
+    for (const [ox, oy] of [[-170, 90], [-260, -40]]) {
+      const copCar = makeCar(pl.x + ox, pl.y + oy, -0.4, rng, { cop: true, color: "#f4f6f8" });
+      copCar.copAI = { officerOut: false, officer: null, shootCd: 0 };
+      G.cars.push(copCar); G.cops.push(copCar);
+    }
   } else if (name === "combat") {
     pl.x = 1880; pl.y = 1900; pl.angle = 0.2;
     G.weapons.pistol = true; G.ammo.pistol = 42; G.weapon = "pistol";

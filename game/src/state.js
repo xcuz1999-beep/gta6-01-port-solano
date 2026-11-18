@@ -35,6 +35,9 @@ export const G = {
   banner: "",
   bannerTimer: 0,
   breakIn: null,
+  heli: null,
+  radio: 0,
+  shopTimer: 0,
 };
 
 export function toast(text, seconds = 3.2) {

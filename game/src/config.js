@@ -16,6 +16,8 @@ export const ZONES = [
   { id: "marina", name: "Marina Azul", x: 3050, y: 3050, color: "#6fc3e7" },
   { id: "safehouse", name: "Casa Reyes", x: 600, y: 3000, color: "#f2d06b" },
   { id: "gunshop", name: "Armeria Solano", x: 1800, y: 1800, color: "#e77f7f" },
+  { id: "hotel", name: "Hotel Miramar", x: 2600, y: 1000, color: "#c08497" },
+  { id: "mercado", name: "Mercado Central", x: 1000, y: 2200, color: "#84a98c" },
 ];
 
 export const CAR_TYPES = [
@@ -23,6 +25,8 @@ export const CAR_TYPES = [
   { name: "Sedan", w: 48, h: 24, top: 285, accel: 215, grip: 0.9, colors: ["#8a93a3", "#33415c", "#6b8f71", "#c9c9c9"] },
   { name: "Pickup", w: 52, h: 26, top: 260, accel: 200, grip: 0.86, colors: ["#7a4a2b", "#4a6741", "#555f6e"] },
   { name: "Van", w: 54, h: 27, top: 235, accel: 180, grip: 0.84, colors: ["#d8d3c3", "#5b7a99", "#8c8c8c"] },
+  { name: "Taxi", w: 48, h: 24, top: 275, accel: 210, grip: 0.9, colors: ["#f2c230"] },
+  { name: "Sport", w: 46, h: 22, top: 365, accel: 300, grip: 0.94, colors: ["#b03060", "#20242c", "#7a3bd9"] },
 ];
 
 export const WEAPONS = {

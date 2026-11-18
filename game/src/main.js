@@ -5,7 +5,7 @@
 import { WORLD_SIZE, DAY_LENGTH, ZONES } from "./config.js";
 import { G, toast, earnPostcard } from "./state.js";
 import { bindInput, pressed, mouse, clearPressed } from "./input.js";
-import { ensureAudio, updateAudio, sfx } from "./audio.js";
+import { ensureAudio, updateAudio, sfx, STATION_NAMES } from "./audio.js";
 import { buildCity, drawCity } from "./city.js";
 import { drawCar } from "./vehicles.js";
 import { updateEffects, drawEffects, drawTint } from "./effects.js";
@@ -13,7 +13,7 @@ import { spawnTraffic, updateTraffic } from "./traffic.js";
 import { spawnPeds, updatePeds, drawPed, witnessCrime } from "./pedestrians.js";
 import { makePlayer, updatePlayer, drawPlayer } from "./player.js";
 import { playerAttack, updateCombat, drawGunman, drawBullets } from "./combat.js";
-import { updatePolice, clearHeat } from "./police.js";
+import { updatePolice, clearHeat, drawHeli } from "./police.js";
 import { updateMissions, startStoryMission, startCourier, STORY } from "./missions.js";
 import { drawHUD, drawScreens } from "./hud.js";
 import { saveGame, loadGame, applySave, hasSave, clearSave } from "./save.js";
@@ -38,6 +38,7 @@ export function newGame(fromSave) {
   G.cash = 120; G.heat = 0; G.wanted = 0; G.bust = 0; G.storyIndex = 0; G.courierCount = 0;
   G.weapons = { pistol: false, smg: false }; G.ammo = { pistol: 0, smg: 0 }; G.weapon = "fists";
   G.postcards = []; G.mission = null; G.clock = 0.32; G.breakIn = null;
+  G.heli = null; G.radio = 0; G.shopTimer = 0;
   if (fromSave) { const data = loadGame(); if (data) applySave(data); }
   G.mode = "playing";
   toast(fromSave ? "Welcome back to Port Solano." : "Reyes arrives in Port Solano. Find Alba at the Chop Shop.");
@@ -62,6 +63,14 @@ function zoneActions() {
       earnPostcard("armeria", "Armeria Solano");
     } else if (z.id === "marina") earnPostcard("marina", "Marina Azul");
     else if (z.id === "chopshop") earnPostcard("chop", "Alba's Chop Shop");
+    else if (z.id === "hotel") { saveGame(); clearHeat(); toast("Checked in at Hotel Miramar — saved, heat cleared."); earnPostcard("hotel", "Hotel Miramar"); }
+    else if (z.id === "mercado") {
+      earnPostcard("mercado", "Mercado Central");
+      if (pl.hp < pl.maxHp && G.shopTimer <= 0) {
+        if (G.cash >= 25) { G.cash -= 25; pl.hp = Math.min(pl.maxHp, pl.hp + 45); G.shopTimer = 20; toast("Empanadas at Mercado Central — +45 HP for $25."); }
+        else toast("Empanadas cost $25.");
+      }
+    }
     if (pressed.KeyQ && !G.mission) {
       if (G.storyIndex < STORY.length) startStoryMission(G.storyIndex);
       else startCourier();
@@ -76,12 +85,14 @@ function step(dt) {
   G.clock = (G.clock + dt / DAY_LENGTH) % 1;
   G.messageTimer = Math.max(0, G.messageTimer - dt);
   G.bannerTimer = Math.max(0, G.bannerTimer - dt);
+  G.shopTimer = Math.max(0, G.shopTimer - dt);
   window.__psMouseDown = mouse.down || !!pressed.KeyF;
   // weapon switching
   if (pressed.Digit1) G.weapon = "fists";
   if (pressed.Digit2 && G.weapons.pistol) G.weapon = "pistol";
   if (pressed.Digit3 && G.weapons.smg) G.weapon = "smg";
   if (pressed.KeyM) { G.muted = !G.muted; toast(G.muted ? "Sound off" : "Sound on"); }
+  if (pressed.KeyR) { G.radio = (G.radio + 1) % 3; toast("Radio: " + STATION_NAMES[G.radio]); }
   mouse.wx = cam.x + mouse.x; mouse.wy = cam.y + mouse.y;
   updatePlayer(dt);
   playerAttack(dt, mouse.wx, mouse.wy);
@@ -120,6 +131,7 @@ function render() {
     ctx.fillStyle = "#e8b88a"; ctx.beginPath(); ctx.arc(o.x, o.y - 2, 5, 0, Math.PI * 2); ctx.fill();
   }
   drawPlayer(ctx);
+  if (G.heli) drawHeli(ctx);
   drawBullets(ctx);
   drawEffects(ctx);
   // mission marker beacon
@@ -137,7 +149,7 @@ function render() {
   drawScreens(ctx, canvas.width, canvas.height);
   if (G.mode === "playing" && G.player && !G.player.car) {
     ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.font = "13px sans-serif"; ctx.textAlign = "center";
-    ctx.fillText("Q at a zone — take a job · E — car · click — fight", canvas.width / 2, canvas.height - 12);
+    ctx.fillText("Q at a zone — take a job · E — car · R — radio · click — fight", canvas.width / 2, canvas.height - 12);
   }
 }
 

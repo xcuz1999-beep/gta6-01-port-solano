@@ -14,7 +14,7 @@ const SHIRTS = ["#e2725b", "#5b8e7d", "#f4d35e", "#6a8eae", "#c08497", "#f7ede2"
 export function spawnPeds(seed) {
   const rng = makeRng(seed * 977 + 31);
   const peds = [];
-  for (let i = 0; i < 42; i++) {
+  for (let i = 0; i < 64; i++) {
     const road = city.roads[Math.floor(rng() * city.roads.length)];
     const along = 120 + rng() * 3300;
     const vertical = rng() < 0.5;
