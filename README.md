@@ -1,52 +1,76 @@
 # Port Solano
 
-An original open-world crime game for the make.fun **gta6-01** bounty — built
-in the spirit of the genre, with every name, place, character and line of
-story its own.
+An original open-world crime game that runs in a desktop browser from static
+files — no build step, no dependencies, no network. Serve the `game/` folder
+with any static server (or run `node serve.ts` and open
+http://localhost:8080), and play with keyboard and mouse.
 
-You are **Reyes**, a wheelman new in the sun-soaked coastal city of Port
-Solano. Fixer **Alba Ferrer** has six jobs that tell the whole story: steal a
-coupe, run hot cargo, collect a debt at speed, outrun a three-star heat,
-defend the chop shop from the Vantrek crew, and drive the Solano goodbye.
+## The story
 
-## What's in the world
+Reyes returns to Port Solano, a sun-baked coastal city of palm avenues and
+back-street garages. Fixer **Alba Ferrer** runs work out of her Chop Shop and
+needs a driver she can trust. Rival **Bruno Vane** and the **Vantrek** crew
+are squeezing the Marina, buying guns, and collecting debts that are not
+theirs. Six story missions take Reyes from a first borrowed ride to a final
+showdown at Marina Azul — with a weapon unlock, cash rewards, and the
+Policía Municipal taking an interest throughout.
 
-- A full city grid — avenues, streets, plazas, a beach and marina — explored
-  on foot and by car, with live traffic that drives the road network and
-  pedestrians who stroll, chat and flee.
-- Any car can be stolen (locked ones take a noisy break-in); arcade driving
-  with drifting, damage, skid marks and wrecks.
-- A five-star wanted system: police patrol cars pursue and ram, officers get
-  out and shoot, and laying low decays the heat.
-- Combat on foot: fists, a pistol and an unlockable Micro SMG, mouse-aimed.
-- HUD with a live minimap (streets, water, police blips, objective marker),
-  health, cash, wanted stars, speedometer and objective line.
-- Start screen, pause, save/load via localStorage, busted/wasted respawns,
-  courier jobs after the story, and 8 collectible postcards in free roam.
-- All sound is synthesized with WebAudio — engine, sirens, shots, jingles.
-  No audio files, no network: the game is static files under `game/`.
+Places that matter: **Alba's Chop Shop** (story), **Clínica del Sol** (heal,
+and lose some heat), **Marina Azul** (deliveries and courier work),
+**Casa Reyes** (safehouse — rest and save), **Armería Solano** (weapons and
+ammo).
 
-## Run it
+## Controls
 
-```
-node serve.ts          # serves game/ at http://localhost:8080
-```
+| Keys | Action |
+| --- | --- |
+| WASD / arrows | Move / drive |
+| Mouse | Aim on foot |
+| Click / hold | Punch or shoot (SMG is automatic) |
+| E | Enter/exit a car, talk, buy, use a place |
+| Hold E | Break into a locked car (sets off the alarm) |
+| Shift | Run |
+| Space | Handbrake / drift |
+| 1 / 2 / 3, Q | Fists / Pistol / SMG, or cycle weapons |
+| Esc | Pause |
+| H | Help |
 
-Or hand the entry in (what the grader runs):
+## Systems
 
-```
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-```
+- **A living city**: a seeded road grid with buildings, sidewalks, a beach
+  and the sea; AI traffic that drives the network in right-hand lanes, and
+  pedestrians who stroll, flee danger, can be knocked down — and witness
+  crimes.
+- **Cars to steal and drive**: parked and moving traffic, locked cars with a
+  timed break-in and alarm, arcade physics with drifting, damage, smoke and
+  wrecks.
+- **Wanted & police**: one to five stars driven by witness reports; patrol
+  cars pursue and ram, officers deploy and shoot at high heat, a bust meter
+  fills when you are boxed in, and staying unseen cools the trail.
+- **Missions**: a six-mission story chain (talk, drive, fight and deliver
+  steps with gold markers and distance readouts) plus repeatable timed
+  courier runs.
+- **Combat**: fists, pistol and SMG against Vantrek gunmen who strafe and
+  shoot back.
+- **HUD & minimap**: cash, day/night clock, health, weapon and ammo, wanted
+  stars — and a live minimap with streets, water, police, pedestrians and
+  your objective.
+- **Save system**: localStorage saves with autosave, a safehouse save point,
+  and Continue on the title screen.
+- **Polish**: a full day cycle with dusk and lit windows at night, particles,
+  skid marks, screen shake, and procedural WebAudio — engine, sirens,
+  gunshots and UI, all synthesized, no audio files.
 
-## Layout
+## Development hooks
 
-- `game/index.html` — the page shell
-- `game/src/` — one module per job: `city` (the world), `vehicles`,
-  `traffic`, `pedestrians`, `police` (wanted system), `player`, `combat`,
-  `missions` (the story), `hud` (minimap + screens), `audio`, `effects`,
-  `save`, `shots` (screenshot scenes), `main` (the loop)
-- `main.ts` — copies `game/` + `screenshots/` to the output and writes the
-  dossier with `vendor/makefun-game.ts`
-- `screenshots/` — four real renders of the game, listed in `shots.json`
+- `?shot=cover|chase|combat|drive&seed=1` — deterministic scenes used for the
+  screenshots in `screenshots/`.
+- `?test=1&seed=1` — a scripted playability self-test that logs
+  `SELFTEST ALL PASS` when movement, car entry/exit, driving, the wanted
+  system, save/load, mission start and pause all check out.
 
-MIT licensed.
+## Hand-in
+
+`node main.ts` (with `MAKEFUN_OUTPUT_DIR` set outside the grader) copies
+`game/` and `screenshots/` to the output directory and writes `dossier.json`
+there using the kit's `buildDossier`.

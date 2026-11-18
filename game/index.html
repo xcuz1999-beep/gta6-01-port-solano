@@ -1,19 +1,78 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Port Solano — an open-world crime game</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1520; }
-  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
-  /* Read aloud, never shown: the status line screen readers announce. */
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  html, body { margin: 0; padding: 0; background: #10131a; height: 100%; overflow: hidden; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: radial-gradient(1200px 700px at 50% 30%, #1d2735, #10131a); }
+  canvas { width: min(100vw, 160vh); height: auto; aspect-ratio: 1280 / 800; display: block; box-shadow: 0 18px 60px rgba(0,0,0,0.55); border-radius: 6px; background: #b9ac8d; }
+  .screen { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; background: rgba(8, 11, 18, 0.66); color: #eef3f7; text-align: center; z-index: 5; padding: 20px; box-sizing: border-box; }
+  .screen h1 { font-size: 64px; letter-spacing: 3px; margin: 0 0 6px; color: #ffd75e; text-shadow: 0 4px 24px rgba(0,0,0,0.6); }
+  .screen h2 { font-size: 40px; letter-spacing: 2px; margin: 0 0 10px; color: #ffd75e; }
+  .screen p { max-width: 560px; line-height: 1.5; color: #cfe0e4; margin: 6px 0 16px; }
+  .screen .tag { color: #7be495; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; font-size: 13px; }
+  button { background: #ffd75e; color: #1c1a12; border: 0; border-radius: 8px; font-size: 17px; font-weight: 700; padding: 12px 30px; margin: 5px; cursor: pointer; min-width: 240px; }
+  button:hover { background: #ffe08a; }
+  button.secondary { background: rgba(255,255,255,0.14); color: #eef3f7; }
+  button.secondary:hover { background: rgba(255,255,255,0.24); }
+  .controls { display: grid; grid-template-columns: auto auto; gap: 4px 18px; text-align: left; font-size: 15px; color: #cfe0e4; margin-bottom: 18px; }
+  .controls b { color: #ffd75e; text-align: right; }
+  #testlog { position: fixed; left: 8px; bottom: 8px; z-index: 9; color: #7be495; background: rgba(0,0,0,0.7); font: 12px monospace; white-space: pre-wrap; max-width: 90vw; pointer-events: none; }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="Port Solano: explore a sun-soaked coastal city on foot and by car, run missions, outrun the police"></canvas>
-<p id="status" role="status" aria-live="polite"></p>
+<div id="wrap">
+  <canvas id="game" width="1280" height="800"></canvas>
+</div>
+
+<div class="screen" id="titleScreen">
+  <div class="tag">An open-world crime game</div>
+  <h1>PORT SOLANO</h1>
+  <p>Reyes is back in the sun-baked streets of Port Solano. Fixer Alba Ferrer has work,
+     rival Bruno Vane has a crew, and the Policía Municipal has questions.
+     Steal cars, run the story, and try to keep the stars off your back.</p>
+  <button id="newBtn">New Game</button>
+  <button id="continueBtn" class="secondary">Continue</button>
+  <p style="font-size:13px; color:#8fa3ad">WASD move · Mouse aim · Click shoot · E enter / interact · Shift run · Space handbrake · 1/2/3 weapons · Esc pause</p>
+</div>
+
+<div class="screen" id="pauseScreen">
+  <h2>PAUSED</h2>
+  <p>Port Solano waits for no one — except right now.</p>
+  <button id="resumeBtn">Resume</button>
+  <button id="pauseSaveBtn" class="secondary">Save Game</button>
+  <button id="pauseHelpBtn" class="secondary">Controls &amp; Help</button>
+</div>
+
+<div class="screen" id="helpScreen">
+  <h2>CONTROLS</h2>
+  <div class="controls">
+    <b>W A S D / Arrows</b><span>Move / drive</span>
+    <b>Mouse</b><span>Aim (on foot)</span>
+    <b>Click / hold</b><span>Punch or shoot (SMG is automatic)</span>
+    <b>E</b><span>Enter / exit car · talk · buy · use a place</span>
+    <b>Hold E</b><span>Break into a locked car (alarm!)</span>
+    <b>Shift</b><span>Run</span>
+    <b>Space</b><span>Handbrake / drift</span>
+    <b>1 · 2 · 3 / Q</b><span>Fists · Pistol · SMG</span>
+    <b>Esc</b><span>Pause</span>
+    <b>H</b><span>This help screen</span>
+  </div>
+  <p>Gold markers are your next objective. Witnessed crimes raise your wanted stars;
+     stay unseen to cool the heat, or let the Clínica lose your paperwork.
+     Casa Reyes saves your game. The Armería sells iron.</p>
+  <button id="helpBackBtn">Back</button>
+</div>
+
+<div class="screen" id="endScreen">
+  <h2 id="endTitle">BUSTED</h2>
+  <p id="endText"></p>
+  <button id="endBtn">Back on the Street</button>
+</div>
+
+<pre id="testlog"></pre>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

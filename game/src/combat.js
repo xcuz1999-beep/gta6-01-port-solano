@@ -1,147 +1,266 @@
-// combat.js — gunfire and fists: the player shoots toward the mouse, police
-// shoot back, bullets fly, spark off buildings, drop pedestrians and
-// officers, and every public crime feeds the wanted system.
+// Port Solano — combat.js
+// Fists, pistol and SMG with mouse aim; bullets with tracers; and the rival
+// gunmen who shoot back. Gunmen strafe at mid-range, take cover-ish pauses
+// behind their fire cooldown, flash when hit and drop cash when they fall.
 
-import { mouse } from './input.js';
+import { WEAPONS } from './config.js';
+import { G, addCash } from './state.js';
+import { pointInBuilding, hasLineOfSight, collideCircle } from './city.js';
+import { clamp, angleLerp } from './random.js';
+import { muzzle, bloodPuff, burst } from './effects.js';
 import { sfx } from './audio.js';
-import { burst, floater } from './effects.js';
-import { scarePeds } from './pedestrians.js';
-import { hurtPlayer } from './player.js';
-import { damageCar } from './vehicles.js';
+import { scarePeds, knockDownPed } from './pedestrians.js';
 
-const BULLET_SPEED = 640;
-
-export function fireBullet(G, x, y, angle, from, damage, spread = 0) {
-  const a = angle + (Math.random() - 0.5) * 2 * spread;
-  G.bullets.push({
-    x, y, vx: Math.cos(a) * BULLET_SPEED, vy: Math.sin(a) * BULLET_SPEED,
-    from, damage, t: 0, life: 0.95,
-  });
-  burst(G, x + Math.cos(angle) * 14, y + Math.sin(angle) * 14, 2, '#ffcf5c', 60, 0.12, 2.5);
+export function spawnGunman(x, y, opts = {}) {
+  const gunman = {
+    x, y, r: 10, angle: 0, hp: opts.hp || 100, maxHp: opts.hp || 100,
+    speed: opts.speed || 118, damage: opts.damage || 8,
+    fireRate: opts.fireRate || 0.85, cooldown: G.fxRng.range(0.3, 1),
+    strafeDir: G.fxRng.sign(), strafeT: G.fxRng.range(1, 2.4),
+    flashT: 0, boss: !!opts.boss, name: opts.name || 'Vantrek gunman',
+    walkPhase: 0, dead: false,
+  };
+  G.gunmen.push(gunman);
+  return gunman;
 }
 
-// Player attack input, called each frame while playing on foot.
-export function updatePlayerCombat(G, dt) {
+export function clearGunmen() { G.gunmen = G.gunmen.filter((g) => g.dead); G.gunmen = []; }
+
+// Can the player fire right now? Handles cooldown and dry-fire clicks.
+export function tryPlayerShoot(aimX, aimY, triggerHeld, triggerPressed) {
   const p = G.player;
-  if (p.car || p.breakIn > 0) return;
-  const w = p.weapons[p.weapon];
-  const wantFire = w.auto ? mouse.down : mouse.clicked;
-  if (!wantFire || p.fireCd > 0 || p.reloadCd > 0) return;
-  if (p.weapon === 'fist') {
-    p.fireCd = w.rate;
-    sfx.punch();
-    // hit whoever stands in front, close
-    const hx = p.x + Math.cos(p.angle) * 22, hy = p.y + Math.sin(p.angle) * 22;
-    let hitSomething = false;
-    for (const ped of G.peds) {
-      if (ped.state !== 'dead' && Math.hypot(ped.x - hx, ped.y - hy) < 20) {
-        hurtPed(G, ped, w.damage, p.angle); hitSomething = true;
-      }
-    }
-    for (const cop of G.cops) {
-      if (cop.state === 'foot' && Math.hypot(cop.x - hx, cop.y - hy) < 20) {
-        hurtCop(G, cop, w.damage, p.angle); hitSomething = true;
-      }
-    }
-    if (hitSomething) { sfx.hit(); if (G.onCrime) G.onCrime(1, p.x, p.y); }
+  if (!p || p.car || p.dead) return;
+  const spec = WEAPONS[G.weapon];
+  G.fireCooldown -= 1 / 60;
+  const wantFire = spec.auto ? triggerHeld : triggerPressed;
+  if (!wantFire || G.fireCooldown > 0) return;
+  if (spec.ammoType && G.ammo[spec.ammoType] <= 0) {
+    G.fireCooldown = 0.25;
+    sfx('deny');
     return;
   }
-  if (w.ammo <= 0) { p.fireCd = 0.3; sfx.dryFire(); floater(G, p.x, p.y - 24, 'No ammo — visit Armería Solano', '#ff6b6b'); return; }
-  w.ammo -= 1;
-  p.fireCd = w.rate;
-  fireBullet(G, p.x, p.y, p.angle, 'player', w.damage, w.spread);
-  sfx.shot();
-  scarePeds(G, p.x, p.y, 300);
-  if (G.onCrime) G.onCrime(1, p.x, p.y);
-  G.camera.shake = Math.min(4, G.camera.shake + 0.7);
-}
-
-export function hurtPed(G, ped, damage, angle) {
-  ped.hp -= damage;
-  burst(G, ped.x, ped.y, 5, '#c0392b', 90, 0.4, 2.5);
-  if (ped.hp <= 0) {
-    ped.state = 'dead';
-    if (G.onCrime) G.onCrime(3, ped.x, ped.y);
+  G.fireCooldown = spec.rate;
+  const angle = Math.atan2(aimY - p.y, aimX - p.x);
+  p.angle = angle;
+  if (spec.ammoType) G.ammo[spec.ammoType]--;
+  G.stats.shotsFired++;
+  muzzle(p.x, p.y, angle);
+  if (G.weapon === 'fists') {
+    sfx('punch');
+    meleeHit(p, angle, spec);
   } else {
-    ped.state = 'down'; ped.downT = 2.2;
-    ped.angle = angle;
-    if (G.onCrime) G.onCrime(2, ped.x, ped.y);
+    sfx(G.weapon === 'smg' ? 'shotSmg' : 'shot');
+    const spread = (G.fxRng.float() - 0.5) * 2 * spec.spread;
+    G.bullets.push({
+      x: p.x + Math.cos(angle) * 15, y: p.y + Math.sin(angle) * 15,
+      vx: Math.cos(angle + spread) * spec.speed, vy: Math.sin(angle + spread) * spec.speed,
+      life: spec.range / spec.speed, damage: spec.damage, from: 'player', tracer: '#ffe9a3',
+    });
+  }
+  scarePeds(p.x, p.y, 210);
+  if (G.commitCrime) G.commitCrime(G.weapon === 'fists' ? 'assault' : 'gunshot', p.x, p.y);
+}
+
+function meleeHit(attacker, angle, spec) {
+  const reach = spec.range + 12;
+  for (const g of G.gunmen) {
+    if (g.dead) continue;
+    if (Math.hypot(g.x - attacker.x, g.y - attacker.y) < reach + g.r && Math.abs(angleDiff(angle, Math.atan2(g.y - attacker.y, g.x - attacker.x))) < 1.1) {
+      hurtGunman(g, spec.damage, angle);
+    }
+  }
+  for (const ped of G.peds) {
+    if (ped.state === 'down') continue;
+    if (Math.hypot(ped.x - attacker.x, ped.y - attacker.y) < reach + ped.r) {
+      knockDownPed(ped, true);
+    }
+  }
+  for (const officer of G.officers) {
+    if (officer.dead) continue;
+    if (Math.hypot(officer.x - attacker.x, officer.y - attacker.y) < reach + officer.r) {
+      hurtOfficer(officer, spec.damage);
+    }
   }
 }
 
-export function hurtCop(G, cop, damage, angle) {
-  cop.hp -= damage;
-  burst(G, cop.x, cop.y, 5, '#c0392b', 90, 0.4, 2.5);
-  if (cop.hp <= 0) {
-    cop.state = 'dead';
-    burst(G, cop.x, cop.y, 10, '#c0392b', 120, 0.5, 3);
-    if (G.onCrime) G.onCrime(cop.thug ? 2 : 4, cop.x, cop.y);
-  } else if (G.onCrime) {
-    G.onCrime(cop.thug ? 2 : 3, cop.x, cop.y);
+function angleDiff(a, b) {
+  let d = (a - b) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+export function hurtGunman(g, damage, fromAngle = 0) {
+  if (g.dead) return;
+  g.hp -= damage;
+  g.flashT = 0.12;
+  bloodPuff(g.x, g.y);
+  sfx('hit');
+  if (g.hp <= 0) {
+    g.dead = true;
+    burst(g.x, g.y, { n: 14, color: '#b03030', speed: 130, life: 0.5 });
+    const reward = g.boss ? 500 : 45;
+    addCash(reward, g.x, g.y);
+    if (G.commitCrime) G.commitCrime('gunshot', g.x, g.y);
+  } else {
+    g.x += Math.cos(fromAngle) * 4;
+    g.y += Math.sin(fromAngle) * 4;
   }
 }
 
-export function updateBullets(G, dt) {
-  const city = G.city;
-  for (const b of G.bullets) {
-    b.t += dt;
+export function hurtOfficer(officer, damage) {
+  if (officer.dead) return;
+  officer.hp -= damage;
+  officer.flashT = 0.12;
+  bloodPuff(officer.x, officer.y);
+  if (officer.hp <= 0) {
+    officer.dead = true;
+    if (G.commitCrime) G.commitCrime('copdown', officer.x, officer.y);
+  }
+}
+
+export function hurtPlayer(damage) {
+  const p = G.player;
+  if (!p || p.dead) return;
+  if (p.car) {
+    // Shots at a driver mostly chew the car; a fraction finds the driver.
+    p.car.hp -= damage * 0.7;
+    if (G.fxRng.chance(0.35)) p.hp -= damage * 0.5;
+  } else {
+    p.hp -= damage;
+  }
+  sfx('hurt');
+  if (p.hp <= 0) { p.hp = 0; p.dead = true; }
+}
+
+export function updateGunmen(dt) {
+  const p = G.player;
+  if (!p) return;
+  for (const g of G.gunmen) {
+    if (g.dead) continue;
+    g.flashT = Math.max(0, g.flashT - dt);
+    g.cooldown -= dt;
+    g.strafeT -= dt;
+    if (g.strafeT <= 0) { g.strafeDir = -g.strafeDir; g.strafeT = G.fxRng.range(0.9, 2.2); }
+    const targetX = p.car ? p.car.x : p.x;
+    const targetY = p.car ? p.car.y : p.y;
+    const d = Math.hypot(targetX - g.x, targetY - g.y);
+    const toPlayer = Math.atan2(targetY - g.y, targetX - g.x);
+    g.angle = angleLerp(g.angle, toPlayer, dt * 7);
+    g.walkPhase += dt * 9;
+    let mx = 0, my = 0;
+    if (d > 300) { mx = Math.cos(toPlayer); my = Math.sin(toPlayer); }
+    else if (d < 130) { mx = -Math.cos(toPlayer); my = -Math.sin(toPlayer); }
+    else { mx = Math.cos(toPlayer + Math.PI / 2) * g.strafeDir; my = Math.sin(toPlayer + Math.PI / 2) * g.strafeDir; }
+    const fixed = collideCircle(g.x + mx * g.speed * dt, g.y + my * g.speed * dt, g.r);
+    g.x = fixed.x; g.y = fixed.y;
+    // Fire when in range with a clear line.
+    if (d < 430 && g.cooldown <= 0 && hasLineOfSight(g.x, g.y, targetX, targetY)) {
+      g.cooldown = g.fireRate * G.fxRng.range(0.8, 1.25);
+      const spread = (G.fxRng.float() - 0.5) * 0.16;
+      const a = toPlayer + spread;
+      muzzle(g.x, g.y, a);
+      sfx('shot');
+      G.bullets.push({
+        x: g.x + Math.cos(a) * 15, y: g.y + Math.sin(a) * 15,
+        vx: Math.cos(a) * 820, vy: Math.sin(a) * 820,
+        life: 0.55, damage: g.damage, from: 'enemy', tracer: '#ff9d7a',
+      });
+    }
+  }
+  // Fallen gunmen linger as bodies for a while, then fade.
+  for (let i = G.gunmen.length - 1; i >= 0; i--) {
+    const g = G.gunmen[i];
+    if (g.dead) { g.fadeT = (g.fadeT || 0) + dt; if (g.fadeT > 25) G.gunmen.splice(i, 1); }
+  }
+}
+
+export function updateBullets(dt) {
+  const p = G.player;
+  for (let i = G.bullets.length - 1; i >= 0; i--) {
+    const b = G.bullets[i];
     b.x += b.vx * dt; b.y += b.vy * dt;
-    // buildings stop bullets
-    for (const bd of city.buildings) {
-      if (b.x > bd.x && b.x < bd.x + bd.w && b.y > bd.y && b.y < bd.y + bd.h) {
-        b.t = b.life;
-        burst(G, b.x, b.y, 3, '#ffe9a3', 80, 0.2, 2);
-        break;
+    b.life -= dt;
+    let kill = b.life <= 0;
+    if (!kill && pointInBuilding(b.x, b.y, -1)) { burst(b.x, b.y, { n: 3, color: '#cbbf9f', speed: 70, life: 0.25, size: 2 }); kill = true; }
+    if (!kill && b.from === 'player') {
+      for (const g of G.gunmen) {
+        if (!g.dead && Math.hypot(g.x - b.x, g.y - b.y) < g.r + 3) { hurtGunman(g, b.damage, Math.atan2(b.vy, b.vx)); kill = true; break; }
+      }
+      if (!kill) for (const officer of G.officers) {
+        if (!officer.dead && Math.hypot(officer.x - b.x, officer.y - b.y) < officer.r + 3) { hurtOfficer(officer, b.damage); kill = true; break; }
+      }
+      if (!kill) for (const ped of G.peds) {
+        if (ped.state !== 'down' && Math.hypot(ped.x - b.x, ped.y - b.y) < ped.r + 3) {
+          ped.state = 'down'; ped.downT = 8; bloodPuff(ped.x, ped.y);
+          if (G.commitCrime) G.commitCrime('hitped', ped.x, ped.y);
+          kill = true; break;
+        }
+      }
+      if (!kill) for (const car of G.cars) {
+        if (Math.hypot(car.x - b.x, car.y - b.y) < 24) { car.hp -= b.damage * 0.4; kill = true; break; }
       }
     }
-    if (b.t >= b.life) continue;
-    if (b.from === 'player') {
-      let consumed = false;
-      for (const ped of G.peds) {
-        if (ped.state !== 'dead' && Math.hypot(ped.x - b.x, ped.y - b.y) < 10) {
-          hurtPed(G, ped, b.damage, Math.atan2(b.vy, b.vx)); consumed = true; break;
-        }
-      }
-      if (!consumed) for (const cop of G.cops) {
-        if (cop.state === 'foot' && Math.hypot(cop.x - b.x, cop.y - b.y) < 10) {
-          hurtCop(G, cop, b.damage, Math.atan2(b.vy, b.vx)); consumed = true; break;
-        }
-      }
-      if (!consumed) for (const car of G.cars) {
-        if (Math.hypot(car.x - b.x, car.y - b.y) < 22) {
-          damageCar(car, b.damage * 0.7, G);
-          burst(G, b.x, b.y, 3, '#ffd166', 90, 0.25, 2);
-          if (car.police && G.onCrime) G.onCrime(3, b.x, b.y);
-          consumed = true; break;
-        }
-      }
-      if (consumed) b.t = b.life;
-    } else {
-      // police bullets: hit the player or the player's car
-      const p = G.player;
-      if (p.car) {
-        if (Math.hypot(p.car.x - b.x, p.car.y - b.y) < 23) {
-          damageCar(p.car, b.damage * 0.5, G);
-          if (Math.random() < 0.4) hurtPlayer(G, b.damage * 0.5);
-          b.t = b.life;
-        }
-      } else if (Math.hypot(p.x - b.x, p.y - b.y) < 10) {
-        hurtPlayer(G, b.damage);
-        burst(G, p.x, p.y, 5, '#c0392b', 90, 0.4, 2.5);
-        b.t = b.life;
-      }
+    if (!kill && b.from !== 'player' && p) {
+      const tx = p.car ? p.car.x : p.x, ty = p.car ? p.car.y : p.y;
+      const rr = p.car ? 24 : p.r + 3;
+      if (Math.hypot(tx - b.x, ty - b.y) < rr) { hurtPlayer(b.damage); kill = true; }
     }
+    if (kill) G.bullets.splice(i, 1);
   }
-  G.bullets = G.bullets.filter(b => b.t < b.life);
 }
 
-export function drawBullets(ctx, G, camX, camY) {
-  ctx.strokeStyle = '#ffe066';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  for (const b of G.bullets) {
-    ctx.moveTo(b.x - camX, b.y - camY);
-    ctx.lineTo(b.x - camX - b.vx * 0.016, b.y - camY - b.vy * 0.016);
+export function drawGunman(ctx, g, camX, camY) {
+  const sx = g.x - camX, sy = g.y - camY;
+  ctx.save();
+  ctx.translate(sx, sy);
+  if (g.dead) {
+    ctx.rotate(g.angle + Math.PI / 2);
+    ctx.fillStyle = '#4a2020';
+    ctx.fillRect(-11, -4, 15, 8);
+    ctx.fillStyle = '#c68642';
+    ctx.beginPath(); ctx.arc(8, 0, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    return;
   }
-  ctx.stroke();
+  ctx.fillStyle = 'rgba(30,25,15,0.3)';
+  ctx.beginPath(); ctx.ellipse(0, 5, 8, 4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.rotate(g.angle);
+  const bob = Math.sin(g.walkPhase) * 1.4;
+  ctx.fillStyle = '#23272e';
+  ctx.fillRect(-2 + bob, -5, 5, 3.4);
+  ctx.fillRect(-2 - bob, 1.6, 5, 3.4);
+  ctx.fillStyle = g.flashT > 0 ? '#ffffff' : (g.boss ? '#7d1f1f' : '#3a3f4a');
+  ctx.beginPath(); ctx.arc(0, 0, 7.4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#c68642';
+  ctx.beginPath(); ctx.arc(1.5, 0, 4.4, 0, Math.PI * 2); ctx.fill();
+  // Gun barrel toward the aim direction.
+  ctx.fillStyle = '#14151a';
+  ctx.fillRect(6, -1.4, 11, 2.8);
+  ctx.restore();
+  if (g.boss) {
+    ctx.fillStyle = '#ff8a7a';
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(g.name, sx, sy - 20);
+  }
+  // Health pip for wounded gunmen.
+  if (g.hp < g.maxHp) {
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(sx - 13, sy - 16, 26, 4);
+    ctx.fillStyle = '#e74c3c';
+    ctx.fillRect(sx - 13, sy - 16, 26 * clamp(g.hp / g.maxHp, 0, 1), 4);
+  }
+}
+
+export function drawBullets(ctx, camX, camY) {
+  for (const b of G.bullets) {
+    const sx = b.x - camX, sy = b.y - camY;
+    ctx.strokeStyle = b.tracer;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(sx - b.vx * 0.016, sy - b.vy * 0.016);
+    ctx.lineTo(sx, sy);
+    ctx.stroke();
+  }
 }

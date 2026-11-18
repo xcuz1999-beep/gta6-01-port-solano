@@ -1,134 +1,146 @@
-// traffic.js — civilian cars that drive the road network on the correct side,
-// slow for the car ahead, turn at intersections, panic when the shooting
-// starts; plus the parked cars lining the streets, waiting to be stolen.
+// Port Solano — traffic.js
+// AI traffic that drives the road grid with right-hand lanes, plus the
+// parked cars that line the streets waiting to be stolen. Traffic brains are
+// simple on purpose: follow your lane to the next junction, sometimes turn,
+// brake for whatever is ahead, and stop dead when your car is wrecked or
+// your driver has been pulled out.
 
-import { ROAD_W, BEACH_Y } from './config.js';
-import { makeCar, CAR_MODELS, coastCar } from './vehicles.js';
-import { randomRoadPoint } from './city.js';
-import { range, pick } from './random.js';
+import { ROAD_WIDTH } from './config.js';
+import { G } from './state.js';
+import { ROAD_LINES, nearestRoadLine } from './city.js';
+import { makeCar, stepCar, carSpeed } from './vehicles.js';
+import { clamp, angleDelta } from './random.js';
 
-function laneOffset(axis, dir) {
-  // right-hand traffic: southbound keeps west, northbound east,
-  // eastbound keeps south, westbound north.
-  return dir > 0 ? (axis === 'v' ? -26 : 26) : (axis === 'v' ? 26 : -26);
+const LANE = ROAD_WIDTH / 4; // right-hand lane offset from the centreline
+const TRAFFIC_TYPES = ['sedan', 'sedan', 'coupe', 'van', 'taxi', 'sedan', 'coupe'];
+const TRAFFIC_COUNT = 15;
+const PARKED_COUNT = 26;
+
+// A traffic brain: the car travels along one axis; `fixed` is the centreline
+// of the road it is on, `dir` its direction sign along the moving axis.
+function newBrain(rng) {
+  const horizontal = rng.chance(0.5);
+  return {
+    horizontal,
+    fixed: rng.pick(ROAD_LINES),
+    dir: rng.sign(),
+    cruise: rng.range(130, 195),
+    turnCooldown: 0,
+  };
 }
 
-function headingOf(axis, dir) {
-  return axis === 'v' ? (dir > 0 ? Math.PI / 2 : -Math.PI / 2) : (dir > 0 ? 0 : Math.PI);
-}
-
-function newBrain(rng, city, car) {
-  const axis = rng() < 0.5 ? 'v' : 'h';
-  const centre = pick(rng, city.centres);
-  const dir = rng() < 0.5 ? 1 : -1;
-  if (axis === 'v') { car.x = centre + laneOffset(axis, dir); car.angle = headingOf(axis, dir); }
-  else { car.y = centre + laneOffset(axis, dir); car.angle = headingOf(axis, dir); }
-  return { axis, centre, dir, target: pickTarget(rng, city, axis, car, dir), cruise: range(rng, 95, 165), panic: 0 };
-}
-
-function pickTarget(rng, city, axis, car, dir) {
-  const pos = axis === 'v' ? car.y : car.x;
-  const ahead = city.centres.filter(c => (c - pos) * dir > 60);
-  if (!ahead.length) return pos + dir * 500;
-  return pick(rng, ahead);
-}
-
-export function spawnTraffic(G, count) {
-  const rng = G.rng;
-  for (let i = 0; i < count; i++) {
-    const p = randomRoadPoint(rng, G.player, 500);
-    const mi = Math.floor(rng() * CAR_MODELS.length);
-    const car = makeCar(mi, pick(rng, CAR_MODELS[mi].colors), p.x, p.y, 0);
-    car.driver = 'traffic';
-    car.ai = newBrain(rng, G.city, car);
-    if (G.cars.some(c => Math.hypot(c.x - car.x, c.y - car.y) < 70)) continue;
-    G.cars.push(car);
+export function spawnTraffic(rng) {
+  for (let i = 0; i < TRAFFIC_COUNT; i++) {
+    const brain = newBrain(rng);
+    const along = rng.range(150, 3450);
+    const x = brain.horizontal ? along : brain.fixed + LANE * brain.dir;
+    const y = brain.horizontal ? brain.fixed - LANE * brain.dir : along;
+    // Right-hand traffic: heading along +axis uses the lane on its right.
+    const angle = brain.horizontal ? (brain.dir > 0 ? 0 : Math.PI) : (brain.dir > 0 ? Math.PI / 2 : -Math.PI / 2);
+    const car = makeCar(x, y, angle, rng.pick(TRAFFIC_TYPES), { driver: 'traffic' });
+    if (brain.horizontal) { car.x = along; car.y = brain.fixed + (brain.dir > 0 ? LANE : -LANE); }
+    else { car.x = brain.fixed + (brain.dir > 0 ? -LANE : LANE); car.y = along; }
+    car.ai = brain;
   }
 }
 
-export function spawnParked(G, count) {
-  const rng = G.rng;
-  for (let i = 0; i < count; i++) {
-    const vertical = rng() < 0.5;
-    const centre = pick(rng, G.city.centres);
-    const side = rng() < 0.5 ? -1 : 1;
-    const along = 90 + rng() * (BEACH_Y - 200);
-    const off = side * (ROAD_W / 2 - 15);
-    const x = vertical ? centre + off : along;
-    const y = vertical ? along : centre + off;
-    if (G.cars.some(c => Math.hypot(c.x - x, c.y - y) < 56)) continue;
-    const mi = Math.floor(rng() * CAR_MODELS.length);
-    const car = makeCar(mi, pick(rng, CAR_MODELS[mi].colors), x, y, vertical ? Math.PI / 2 : 0);
-    if (rng() < 0.25) car.locked = true; // some parked cars are locked: breaking in takes a moment and makes noise
-    G.cars.push(car);
+export function spawnParkedCars(rng) {
+  let placed = 0, guard = 0;
+  while (placed < PARKED_COUNT && guard++ < 400) {
+    const vertical = rng.chance(0.5);
+    const line = rng.pick(ROAD_LINES);
+    const along = rng.range(120, 3480);
+    const side = rng.sign();
+    const x = vertical ? line + side * (ROAD_WIDTH / 2 - 13) : along;
+    const y = vertical ? along : line + side * (ROAD_WIDTH / 2 - 13);
+    if (y > 3100) continue; // not on the beach
+    if (G.cars.some((c) => Math.hypot(c.x - x, c.y - y) < 70)) continue;
+    const angle = vertical ? (side > 0 ? Math.PI / 2 : -Math.PI / 2) : (side > 0 ? Math.PI : 0);
+    const type = rng.pick(TRAFFIC_TYPES.concat(['sport']));
+    // Roughly a third of parked cars are locked: those need a break-in.
+    makeCar(x, y, angle, type, { parked: true, locked: rng.chance(0.34) });
+    placed++;
   }
 }
 
-export function updateTraffic(G, dt) {
-  const city = G.city;
+// Is there a car or the player just ahead of this one? Traffic brakes for it.
+function obstacleAhead(car, lookDist) {
+  const fx = Math.cos(car.angle), fy = Math.sin(car.angle);
+  const px = car.x + fx * lookDist, py = car.y + fy * lookDist;
+  for (const other of G.cars) {
+    if (other === car) continue;
+    if (Math.hypot(other.x - px, other.y - py) < 30) return true;
+  }
+  const p = G.player;
+  if (p && !p.car && Math.hypot(p.x - px, p.y - py) < 24) return true;
+  return false;
+}
+
+export function updateTraffic(dt) {
   for (const car of G.cars) {
-    if (car.driver === 'traffic' && !car.wrecked) {
-      const ai = car.ai;
-      if (ai.panic > 0) ai.panic -= dt;
-      const speedTarget = ai.panic > 0 ? 250 : ai.cruise;
-      // slow for a car ahead in the same lane
-      let gap = Infinity;
-      const hx = Math.cos(car.angle), hy = Math.sin(car.angle);
-      for (const o of G.cars) {
-        if (o === car) continue;
-        const dx = o.x - car.x, dy = o.y - car.y;
-        const ahead = dx * hx + dy * hy;
-        const side = Math.abs(dx * -hy + dy * hx);
-        if (ahead > 0 && ahead < gap && side < 20) gap = ahead;
-      }
-      let speed = car.trafficSpeed || 0;
-      const want = gap < 58 ? 0 : speedTarget;
-      speed += Math.max(-260 * dt, Math.min(120 * dt, want - speed));
-      car.trafficSpeed = speed;
-      // advance along the axis, ease across to the lane line
-      if (ai.axis === 'v') {
-        car.y += ai.dir * speed * dt;
-        const ideal = ai.centre + laneOffset('v', ai.dir);
-        car.x += Math.max(-130 * dt, Math.min(130 * dt, ideal - car.x));
-        if ((car.y - ai.target) * ai.dir >= 0) decideAtIntersection(G, car);
-      } else {
-        car.x += ai.dir * speed * dt;
-        const ideal = ai.centre + laneOffset('h', ai.dir);
-        car.y += Math.max(-130 * dt, Math.min(130 * dt, ideal - car.y));
-        if ((car.x - ai.target) * ai.dir >= 0) decideAtIntersection(G, car);
-      }
-      const targetAngle = headingOf(ai.axis, ai.dir);
-      let da = targetAngle - car.angle;
-      while (da > Math.PI) da -= Math.PI * 2;
-      while (da < -Math.PI) da += Math.PI * 2;
-      car.angle += da * Math.min(1, 6 * dt);
-      car.vx = Math.cos(car.angle) * speed; car.vy = Math.sin(car.angle) * speed;
-    } else if (car.driver !== 'player' && car.driver !== 'police') {
-      coastCar(car, dt);
+    if (car.driver !== 'traffic' || !car.ai) continue;
+    if (car.wrecked) continue;
+    const brain = car.ai;
+    brain.turnCooldown -= dt;
+
+    // Where the lane centre is, and which junction comes next.
+    let targetX, targetY;
+    if (brain.horizontal) {
+      targetY = brain.fixed + (brain.dir > 0 ? LANE : -LANE);
+      targetX = car.x + brain.dir * 120;
+    } else {
+      targetX = brain.fixed + (brain.dir > 0 ? -LANE : LANE);
+      targetY = car.y + brain.dir * 120;
     }
+
+    // At a junction, sometimes pick a new road to follow.
+    const nearX = nearestRoadLine(car.x), nearY = nearestRoadLine(car.y);
+    const atJunction = Math.abs(car.x - nearX) < 30 && Math.abs(car.y - nearY) < 30;
+    if (atJunction && brain.turnCooldown <= 0 && G.fxRng.chance(0.4)) {
+      brain.turnCooldown = 2.5;
+      if (brain.horizontal) {
+        brain.horizontal = false;
+        brain.fixed = nearX;
+        brain.dir = G.fxRng.sign();
+        if ((brain.dir > 0 && car.y > nearY + 4) || (brain.dir < 0 && car.y < nearY - 4)) brain.dir = -brain.dir;
+      } else {
+        brain.horizontal = true;
+        brain.fixed = nearY;
+        brain.dir = G.fxRng.sign();
+        if ((brain.dir > 0 && car.x > nearX + 4) || (brain.dir < 0 && car.x < nearX - 4)) brain.dir = -brain.dir;
+      }
+    }
+    // Off the south edge the road ends at the beach: turn around.
+    if (car.y > 3060 && !brain.horizontal && brain.dir > 0) { brain.horizontal = true; brain.fixed = nearestRoadLine(car.y); brain.dir = G.fxRng.sign(); }
+    if (car.x < 130 && brain.horizontal && brain.dir < 0) brain.dir = 1;
+    if (car.x > 3470 && brain.horizontal && brain.dir > 0) brain.dir = -1;
+    if (car.y < 130 && !brain.horizontal && brain.dir < 0) brain.dir = 1;
+
+    const desired = Math.atan2(targetY - car.y, targetX - car.x);
+    const steer = clamp(angleDelta(car.angle, desired) * 2.4, -1, 1);
+    let throttle = 0.85;
+    const speed = carSpeed(car);
+    if (speed > brain.cruise) throttle = 0;
+    if (obstacleAhead(car, 58)) throttle = speed > 30 ? -0.9 : 0;
+    stepCar(car, throttle, steer, false, dt);
   }
-  // keep the streets populated: replace cars that were stolen or wrecked
-  const live = G.cars.filter(c => c.driver === 'traffic').length;
-  if (live < 13 && Math.random() < dt * 0.7) spawnTraffic(G, 1);
 }
 
-function decideAtIntersection(G, car) {
-  const ai = car.ai;
-  const rng = G.rng;
-  const here = ai.axis === 'v' ? car.y : car.x;
-  // the crossing road we just reached
-  const crossing = G.city.centres.reduce((best, c) => Math.abs(c - here) < Math.abs(best - here) ? c : best, G.city.centres[0]);
-  if (rng() < 0.45) {
-    // turn onto the crossing road
-    const oldCentre = ai.centre;
-    ai.axis = ai.axis === 'v' ? 'h' : 'v';
-    ai.centre = crossing;
-    ai.dir = rng() < 0.5 ? 1 : -1;
-    if (ai.axis === 'v') car.x = oldCentre; else car.y = oldCentre;
-    ai.target = pickTarget(rng, G.city, ai.axis, car, ai.dir);
-  } else {
-    ai.target = pickTarget(rng, G.city, ai.axis, car, ai.dir);
-    // reached the end of the road: turn around
-    if (Math.abs(ai.target - here) < 80) { ai.dir *= -1; ai.target = pickTarget(rng, G.city, ai.axis, car, ai.dir); }
+// Keep the city populated: if traffic drifts too far from the player or gets
+// wrecked, quietly recycle it to a road a few blocks away.
+export function maintainTraffic(dt) {
+  const p = G.player;
+  if (!p) return;
+  for (const car of G.cars) {
+    if (car.driver !== 'traffic') continue;
+    const d = Math.hypot(car.x - p.x, car.y - p.y);
+    if (d > 1500 || (car.wrecked && d > 500)) {
+      const brain = newBrain(G.fxRng);
+      const along = clamp((brain.horizontal ? p.x : p.y) + G.fxRng.range(-700, 700), 150, 3450);
+      car.ai = brain;
+      car.hp = car.maxHp; car.wrecked = false; car.vx = 0; car.vy = 0;
+      if (brain.horizontal) { car.x = along; car.y = brain.fixed + (brain.dir > 0 ? LANE : -LANE); car.angle = brain.dir > 0 ? 0 : Math.PI; }
+      else { car.x = brain.fixed + (brain.dir > 0 ? -LANE : LANE); car.y = along; car.angle = brain.dir > 0 ? Math.PI / 2 : -Math.PI / 2; }
+    }
   }
 }

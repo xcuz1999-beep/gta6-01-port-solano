@@ -1,46 +1,76 @@
-// save.js — persistence in localStorage: cash, story progress, the SMG
-// unlock, postcards found and lifetime stats survive a closed tab.
+// Port Solano — save.js
+// localStorage persistence: where Reyes stands, what he carries, how far the
+// story has come. Autosaves on a timer and at every mission end; the title
+// screen's Continue button reads exactly what saveGame wrote.
 
 import { SAVE_KEY } from './config.js';
+import { G } from './state.js';
 
-export function saveGame(G) {
+export function hasSave() {
+  try { return !!window.localStorage.getItem(SAVE_KEY); } catch { return false; }
+}
+
+export function saveGame() {
+  const p = G.player;
+  if (!p) return false;
+  const data = {
+    version: 1,
+    x: p.car ? p.car.x : p.x,
+    y: p.car ? p.car.y : p.y,
+    hp: p.hp,
+    cash: G.cash,
+    clock: G.clock,
+    day: G.day,
+    weapon: G.weapon,
+    owned: G.owned,
+    ammo: G.ammo,
+    missionIndex: G.missionIndex,
+    storyDone: G.storyDone,
+    postcards: G.postcards,
+    stats: G.stats,
+  };
   try {
-    const data = {
-      cash: G.cash,
-      missionIndex: G.missionIndex,
-      smg: !G.player.weapons.smg.locked,
-      smgAmmo: G.player.weapons.smg.ammo,
-      pistolAmmo: G.player.weapons.pistol.ammo,
-      postcards: G.postcards,
-      stats: G.stats,
-      x: G.player.car ? G.player.car.x : G.player.x,
-      y: G.player.car ? G.player.car.y : G.player.y,
-    };
-    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+    window.localStorage.setItem(SAVE_KEY, JSON.stringify(data));
     return true;
   } catch { return false; }
 }
 
 export function loadGame() {
+  let raw = null;
+  try { raw = window.localStorage.getItem(SAVE_KEY); } catch { raw = null; }
+  if (!raw) return null;
   try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    const data = JSON.parse(raw);
+    if (!data || data.version !== 1) return null;
+    return data;
   } catch { return null; }
 }
 
-export function clearSave() {
-  try { localStorage.removeItem(SAVE_KEY); } catch { /* private mode */ }
+// Apply a loaded record to the live state. The world itself (city, traffic)
+// is rebuilt from the seed by main.js; only Reyes and his progress move.
+export function applySave(data) {
+  const p = G.player;
+  if (!p || !data) return false;
+  if (p.car) { p.car.driver = null; p.car = null; }
+  p.x = data.x; p.y = data.y;
+  p.hp = Math.max(20, data.hp || 100);
+  p.dead = false;
+  G.cash = data.cash ?? G.cash;
+  G.clock = data.clock ?? G.clock;
+  G.day = data.day ?? 1;
+  G.weapon = data.weapon || 'fists';
+  G.owned = { fists: true, ...(data.owned || {}) };
+  G.ammo = { pistol: 0, smg: 0, ...(data.ammo || {}) };
+  G.missionIndex = data.missionIndex || 0;
+  G.storyDone = !!data.storyDone;
+  G.postcards = data.postcards || [];
+  G.stats = { stolen: 0, knockdowns: 0, shotsFired: 0, missionsDone: 0, earned: 0, ...(data.stats || {}) };
+  G.mission = null;
+  G.courier = null;
+  G.wanted = 0; G.heat = 0; G.bust = 0;
+  return true;
 }
 
-export function applySave(G, data) {
-  G.cash = data.cash || 0;
-  G.missionIndex = data.missionIndex || 0;
-  if (data.smg) {
-    G.player.weapons.smg.locked = false;
-    G.player.weapons.smg.ammo = data.smgAmmo ?? 160;
-  }
-  if (typeof data.pistolAmmo === 'number') G.player.weapons.pistol.ammo = data.pistolAmmo;
-  G.postcards = Array.isArray(data.postcards) ? data.postcards : [];
-  if (data.stats) G.stats = data.stats;
-  if (typeof data.x === 'number') { G.player.x = data.x; G.player.y = data.y; }
+export function wipeSave() {
+  try { window.localStorage.removeItem(SAVE_KEY); } catch { /* nothing to wipe */ }
 }

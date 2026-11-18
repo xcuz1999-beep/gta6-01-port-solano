@@ -1,152 +1,188 @@
-// pedestrians.js — the people of Port Solano: they stroll the sidewalks and
-// the beach, chat in pairs, flee from gunfire and speeding cars, and fall
-// when hit. Also draws the little figures the player and police reuse.
+// Port Solano — pedestrians.js
+// Sidewalk life: citizens stroll along the pavement edges, panic and flee
+// from gunfire, speeding cars and violence, can be knocked down (a crime,
+// and they remember it), and — crucially — witness crimes and file the
+// reports the police module acts on.
 
-import { ROAD_W, BEACH_Y, WORLD } from './config.js';
-import { collideBuildings } from './city.js';
-import { range, pick } from './random.js';
+import { ROAD_WIDTH, WITNESS_RADIUS } from './config.js';
+import { G } from './state.js';
+import { ROAD_LINES, collideCircle } from './city.js';
+import { clamp, angleLerp } from './random.js';
+import { bloodPuff } from './effects.js';
+import { sfx } from './audio.js';
 
-const SHIRTS = ['#ef476f', '#ffd166', '#06d6a0', '#118ab2', '#f78c6b', '#c8b6ff', '#ffffff', '#2a9d8f'];
-const SKINS = ['#f2c09a', '#c68863', '#8d5a3b', '#6f4423', '#ffd9b3'];
+const PED_COUNT = 42;
+const SHIRT_COLORS = ['#e74c3c', '#3498db', '#f1c40f', '#2ecc71', '#e67e22', '#9b59b6', '#ecf0f1', '#fd79a8', '#00b894', '#fdcb6e'];
+const SKIN_TONES = ['#f1c27d', '#e0ac69', '#c68642', '#8d5524', '#ffdbac'];
 
-export function makePed(rng, x, y) {
-  return {
-    kind: 'ped', x, y, angle: range(rng, 0, Math.PI * 2),
-    tx: x, ty: y, speed: range(rng, 42, 78),
-    shirt: pick(rng, SHIRTS), skin: pick(rng, SKINS),
-    state: 'walk', hp: 30, downT: 0, fleeT: 0, threat: null,
-    chatT: range(rng, 0, 9), phase: range(rng, 0, 6),
-  };
-}
-
-export function spawnPeds(G, count) {
-  const rng = G.rng;
-  for (let i = 0; i < count; i++) {
-    const onBeach = rng() < 0.18;
-    let x, y;
-    if (onBeach) { x = range(rng, 80, WORLD - 80); y = range(rng, BEACH_Y + 30, BEACH_Y + 130); }
-    else {
-      const vertical = rng() < 0.5;
-      const c = pick(rng, G.city.centres);
-      const side = rng() < 0.5 ? -1 : 1;
-      const along = range(rng, 70, BEACH_Y - 60);
-      x = vertical ? c + side * (ROAD_W / 2 + 11) : along;
-      y = vertical ? along : c + side * (ROAD_W / 2 + 11);
-    }
-    const ped = makePed(rng, x, y);
-    chooseTarget(G, ped);
-    G.peds.push(ped);
+export function spawnPeds(rng) {
+  G.peds = [];
+  for (let i = 0; i < PED_COUNT; i++) {
+    const vertical = rng.chance(0.5);
+    const line = rng.pick(ROAD_LINES);
+    const side = rng.sign();
+    const offset = ROAD_WIDTH / 2 + 13;
+    const along = rng.range(100, 3400);
+    const x = vertical ? line + side * offset : along;
+    const y = vertical ? along : line + side * offset;
+    if (y > 3120) { i--; continue; }
+    G.peds.push({
+      x, y, r: 9, angle: rng.range(0, Math.PI * 2),
+      speed: rng.range(52, 84), walkPhase: rng.range(0, 6),
+      shirt: rng.pick(SHIRT_COLORS), skin: rng.pick(SKIN_TONES),
+      state: 'walk',           // walk | flee | down
+      panicT: 0, downT: 0, wanderT: rng.range(1, 5),
+      targetAngle: 0, reportCooldown: 0,
+      vertical, line, side,
+    });
   }
 }
 
-function chooseTarget(G, ped) {
-  const rng = G.rng;
-  // wander: a new stroll target a few hundred units away, kept on land
-  ped.tx = Math.max(30, Math.min(WORLD - 30, ped.x + range(rng, -420, 420)));
-  ped.ty = Math.max(30, Math.min(BEACH_Y + 130, ped.y + range(rng, -420, 420)));
-}
-
-export function scarePeds(G, x, y, radius) {
+// Something scary happened at (x, y): nearby peds run from it.
+export function scarePeds(x, y, radius = 190) {
   for (const ped of G.peds) {
-    if (ped.state === 'down' || ped.state === 'dead') continue;
+    if (ped.state === 'down') continue;
     if (Math.hypot(ped.x - x, ped.y - y) < radius) {
-      ped.state = 'flee'; ped.fleeT = range(G.rng, 1.2, 2.6);
-      ped.threat = { x, y };
+      ped.state = 'flee';
+      ped.panicT = Math.max(ped.panicT, 2.6);
+      ped.targetAngle = Math.atan2(ped.y - y, ped.x - x);
     }
   }
 }
 
-export function updatePeds(G, dt) {
+// A crime happened. Any conscious ped with a view of it becomes a witness:
+// after a short shocked delay they file a report the police will answer.
+export function witnessCrime(kind, x, y, severity) {
+  let witnessed = false;
   for (const ped of G.peds) {
-    if (ped.state === 'dead') continue;
+    if (ped.state === 'down') continue;
+    if (Math.hypot(ped.x - x, ped.y - y) <= WITNESS_RADIUS) {
+      witnessed = true;
+      if (ped.reportCooldown <= 0) {
+        ped.reportCooldown = 6;
+        G.reports.push({ kind, x, y, severity, delay: 0.9 });
+      }
+      ped.state = 'flee';
+      ped.panicT = Math.max(ped.panicT, 2.2);
+      ped.targetAngle = Math.atan2(ped.y - y, ped.x - x);
+    }
+  }
+  return witnessed;
+}
+
+export function knockDownPed(ped, byPlayerAction) {
+  if (ped.state === 'down') return;
+  ped.state = 'down';
+  ped.downT = 7;
+  bloodPuff(ped.x, ped.y);
+  sfx('hit');
+  if (byPlayerAction) {
+    G.stats.knockdowns++;
+    if (G.commitCrime) G.commitCrime('hitped', ped.x, ped.y);
+  }
+}
+
+export function updatePeds(dt) {
+  const p = G.player;
+  for (const ped of G.peds) {
+    ped.reportCooldown -= dt;
+    ped.walkPhase += dt * (ped.state === 'flee' ? 13 : 8);
     if (ped.state === 'down') {
       ped.downT -= dt;
-      if (ped.downT <= 0 && ped.hp > 0) ped.state = 'walk';
+      if (ped.downT <= 0) { ped.state = 'flee'; ped.panicT = 2; ped.targetAngle = G.fxRng.range(0, Math.PI * 2); }
       continue;
     }
-    let tx = ped.tx, ty = ped.ty, speed = ped.speed;
-    if (ped.state === 'flee') {
-      ped.fleeT -= dt;
-      if (ped.fleeT <= 0) { ped.state = 'walk'; chooseTarget(G, ped); }
-      else if (ped.threat) {
-        const dx = ped.x - ped.threat.x, dy = ped.y - ped.threat.y;
-        const d = Math.hypot(dx, dy) || 1;
-        tx = ped.x + (dx / d) * 200; ty = ped.y + (dy / d) * 200;
-        speed = 215;
+
+    // A fast car bearing down on a pedestrian scares them off the road.
+    if (p && p.car && Math.hypot(p.car.x - ped.x, p.car.y - ped.y) < 90 && Math.hypot(p.car.vx, p.car.vy) > 120) {
+      ped.state = 'flee'; ped.panicT = Math.max(ped.panicT, 1.4);
+      ped.targetAngle = Math.atan2(ped.y - p.car.y, ped.x - p.car.x);
+    }
+    // Cars (any) can knock a pedestrian down.
+    for (const car of G.cars) {
+      const speed = Math.hypot(car.vx, car.vy);
+      if (speed > 55 && Math.hypot(car.x - ped.x, car.y - ped.y) < 26) {
+        knockDownPed(ped, car.driver === 'player');
+        break;
       }
     }
-    const dx = tx - ped.x, dy = ty - ped.y;
-    const d = Math.hypot(dx, dy);
-    if (d < 8) { if (ped.state === 'walk') chooseTarget(G, ped); continue; }
-    const vx = (dx / d) * speed, vy = (dy / d) * speed;
-    ped.x += vx * dt; ped.y += vy * dt;
-    ped.angle = Math.atan2(vy, vx);
-    ped.phase += dt * (speed > 120 ? 13 : 8);
-    collideBuildings(ped, 10);
+    if (ped.state === 'down') continue;
+
+    let speed = ped.speed;
+    if (ped.state === 'flee') {
+      speed = 178;
+      ped.panicT -= dt;
+      ped.angle = angleLerp(ped.angle, ped.targetAngle, dt * 8);
+      if (ped.panicT <= 0) ped.state = 'walk';
+    } else {
+      // Stroll along the pavement: follow the road edge, drift at junctions.
+      ped.wanderT -= dt;
+      if (ped.wanderT <= 0) {
+        ped.wanderT = G.fxRng.range(2, 6);
+        if (G.fxRng.chance(0.4)) ped.targetAngle = ped.angle + Math.PI; // turn back
+        else {
+          const base = ped.vertical ? Math.PI / 2 : 0;
+          ped.targetAngle = base + (G.fxRng.chance(0.5) ? 0 : Math.PI);
+        }
+      }
+      ped.angle = angleLerp(ped.angle, ped.targetAngle || ped.angle, dt * 3);
+    }
+    const nx = ped.x + Math.cos(ped.angle) * speed * dt;
+    const ny = ped.y + Math.sin(ped.angle) * speed * dt;
+    const fixed = collideCircle(nx, ny, ped.r);
+    if (fixed.x !== nx || fixed.y !== ny) ped.targetAngle = ped.angle + Math.PI * 0.7;
+    ped.x = clamp(fixed.x, 12, 3588);
+    ped.y = clamp(fixed.y, 12, 3408);
   }
-  // keep the sidewalks alive away from the player
-  if (G.peds.filter(p => p.state !== 'dead').length < 22 && Math.random() < dt * 0.5) {
-    const before = G.peds.length;
-    spawnPeds(G, 1);
-    const ped = G.peds[G.peds.length - 1];
-    if (ped && G.player && Math.hypot(ped.x - G.player.x, ped.y - G.player.y) < 480 && G.peds.length > before) {
-      G.peds.pop(); // not right on top of the player
+  // Keep peds loosely near the player so the streets never feel empty.
+  if (p) {
+    for (const ped of G.peds) {
+      if (Math.hypot(ped.x - p.x, ped.y - p.y) > 1400 && ped.state !== 'down') {
+        const line = G.fxRng.pick(ROAD_LINES);
+        const vertical = G.fxRng.chance(0.5);
+        const along = clamp((vertical ? p.y : p.x) + G.fxRng.range(-600, 600), 120, 3350);
+        const offset = ROAD_WIDTH / 2 + 13;
+        ped.x = vertical ? line + G.fxRng.sign() * offset : along;
+        ped.y = vertical ? along : line + G.fxRng.sign() * offset;
+        if (ped.y > 3120) ped.y = 2900;
+      }
     }
   }
-}
-
-export function drawFigure(ctx, x, y, angle, shirt, skin, phase, opts = {}) {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.fillStyle = 'rgba(25,25,35,0.30)';
-  ctx.beginPath(); ctx.ellipse(1.5, 3.5, 8, 4.5, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.rotate(angle);
-  // legs scissor while walking
-  const sw = Math.sin(phase) * 4;
-  ctx.strokeStyle = opts.pants || '#33404f';
-  ctx.lineWidth = 3.4;
-  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-2 + sw * 0.4, 5 + sw); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-2 - sw * 0.4, 5 - sw); ctx.stroke();
-  // torso and head
-  ctx.fillStyle = shirt;
-  ctx.beginPath(); ctx.arc(0, 0, 6.4, 0, Math.PI * 2); ctx.fill();
-  if (opts.badge) { ctx.fillStyle = '#ffd60a'; ctx.fillRect(1, -2, 3, 3); }
-  ctx.fillStyle = skin;
-  ctx.beginPath(); ctx.arc(1.5, 0, 3.6, 0, Math.PI * 2); ctx.fill();
-  if (opts.hat) {
-    ctx.fillStyle = opts.hat;
-    ctx.beginPath(); ctx.arc(1.5, 0, 4.4, Math.PI * 0.9, Math.PI * 1.9); ctx.fill();
-  }
-  if (opts.gun) {
-    ctx.strokeStyle = '#1c1c1e'; ctx.lineWidth = 2.6;
-    ctx.beginPath(); ctx.moveTo(4, 2); ctx.lineTo(13, 2); ctx.stroke();
-  }
-  ctx.restore();
 }
 
 export function drawPed(ctx, ped, camX, camY) {
   const sx = ped.x - camX, sy = ped.y - camY;
-  if (ped.state === 'dead') {
-    ctx.save();
-    ctx.translate(sx, sy); ctx.rotate(ped.angle);
-    ctx.fillStyle = 'rgba(120,20,20,0.5)';
-    ctx.beginPath(); ctx.ellipse(0, 0, 13, 8, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = ped.shirt;
-    ctx.beginPath(); ctx.arc(0, 0, 6.4, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = ped.skin;
-    ctx.beginPath(); ctx.arc(8, 2, 3.6, 0, Math.PI * 2); ctx.fill();
-    ctx.restore();
-    return;
-  }
+  ctx.save();
+  ctx.translate(sx, sy);
   if (ped.state === 'down') {
-    ctx.save();
-    ctx.translate(sx, sy); ctx.rotate(ped.angle + 0.8);
+    ctx.rotate(ped.angle + Math.PI / 2);
+    ctx.fillStyle = 'rgba(30,25,15,0.3)';
+    ctx.fillRect(-12, 3, 24, 7);
     ctx.fillStyle = ped.shirt;
-    ctx.beginPath(); ctx.ellipse(0, 0, 9, 5.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillRect(-11, -4, 15, 8);
     ctx.fillStyle = ped.skin;
-    ctx.beginPath(); ctx.arc(9, 0, 3.4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(8, 0, 5, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
     return;
   }
-  drawFigure(ctx, sx, sy, ped.angle, ped.shirt, ped.skin, ped.phase);
+  const bob = Math.sin(ped.walkPhase) * 1.6;
+  ctx.fillStyle = 'rgba(30,25,15,0.3)';
+  ctx.beginPath(); ctx.ellipse(0, 5, 8, 4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.rotate(ped.angle);
+  // Legs scissor while walking.
+  ctx.fillStyle = '#2d3436';
+  ctx.fillRect(-2 + bob, -5, 5, 3.4);
+  ctx.fillRect(-2 - bob, 1.6, 5, 3.4);
+  // Torso and head.
+  ctx.fillStyle = ped.shirt;
+  ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = ped.skin;
+  ctx.beginPath(); ctx.arc(1.5, 0, 4.4, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  if (ped.state === 'flee') {
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('!', sx, sy - 14);
+  }
 }
